@@ -10,6 +10,7 @@ import TopBar from '@/components/layout/TopBar';
 import BottomNav, { type MobileTab } from '@/components/layout/BottomNav';
 import SentimentRadar from '@/components/dashboard/SentimentRadar';
 import TrendingStocks from '@/components/dashboard/TrendingStocks';
+import PortfolioView from '@/components/dashboard/PortfolioView';
 import CopilotChat from '@/components/copilot/CopilotChat';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 
@@ -29,11 +30,14 @@ export default function Dashboard({ userEmail }: DashboardProps) {
         {/* Main content */}
         <main className="flex-1 overflow-auto p-4 lg:p-6">
           {isDesktop ? (
-            // Desktop: full grid always
-            // PortfolioOverview hidden until a real holdings input UI ships (Phase 2).
-            <div className="mx-auto grid max-w-6xl gap-6">
+            // Desktop: SentimentRadar + TrendingStocks side-by-side, then
+            // PortfolioView full-width below.
+            <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-2">
               <SentimentRadar />
               <TrendingStocks />
+              <div className="lg:col-span-2">
+                <PortfolioView />
+              </div>
             </div>
           ) : (
             // Mobile: tab-switched
@@ -44,6 +48,7 @@ export default function Dashboard({ userEmail }: DashboardProps) {
                   <TrendingStocks />
                 </div>
               )}
+              {mobileTab === 'portfolio' && <PortfolioView />}
               {mobileTab === 'chat' && (
                 <div className="h-[calc(100vh-8.5rem)] overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
                   <CopilotChat />
