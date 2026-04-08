@@ -4,11 +4,22 @@
 // total value, and Grok sentiment per ticker. Inline + and × controls for
 // adding/removing holdings (same pattern as the watchlist editor).
 //
-// Backend: /api/portfolio (GET enriches with prices via lib/prices.ts).
+// Backend: /api/portfolio (GET enriches with prices via lib/prices.ts)
+// + /api/technicals (per-ticker BUY/SELL/NEUTRAL aggregated from SMA/EMA/
+// RSI/MACD/Bollinger via lib/technicals.ts).
+//
 // Polygon Stocks Basic free tier — end-of-day prices only, NOT real-time.
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Plus, Wallet, X } from 'lucide-react';
+import {
+  CombinedBadge,
+  SignalBadge,
+  combineSignals,
+  sentimentToSignal,
+  type Signal,
+  type CombinedSignal,
+} from '@/components/dashboard/SignalBadge';
 import type { EnrichedPortfolioHolding } from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
@@ -24,6 +35,14 @@ interface PortfolioApiResponse {
   pricesAsOfDate: string | null;
 }
 
+interface TechnicalApiResponse {
+  results: Array<{
+    ticker: string;
+    signal: { signal: Signal } | null;
+    asOfDate: string | null;
+  }>;
+}
+
 const EMPTY_TOTALS: PortfolioApiResponse['totals'] = {
   value: null,
   dayChangeAmount: null,
@@ -31,8 +50,14 @@ const EMPTY_TOTALS: PortfolioApiResponse['totals'] = {
   weightedSentiment: null,
 };
 
+interface RowState {
+  holding: EnrichedPortfolioHolding;
+  technicalSignal: Signal | null;
+  combined: CombinedSignal | null;
+}
+
 export default function PortfolioView() {
-  const [holdings, setHoldings] = useState<EnrichedPortfolioHolding[]>([]);
+  const [rows, setRows] = useState<RowState[]>([]);
   const [totals, setTotals] = useState<PortfolioApiResponse['totals']>(EMPTY_TOTALS);
   const [pricesAsOfDate, setPricesAsOfDate] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -43,29 +68,52 @@ export default function PortfolioView() {
   const [newShares, setNewShares] = useState('');
   const tickerInputRef = useRef<HTMLInputElement>(null);
 
-  const applyResponse = useCallback((data: PortfolioApiResponse) => {
+  // Fetch /api/portfolio + /api/technicals in parallel and merge into row state.
+  const refreshAll = useCallback(async () => {
+    const portfolioP = fetch('/api/portfolio').then((r) => r.json() as Promise<PortfolioApiResponse>);
+    const portfolio = await portfolioP;
+
+    const tickers = (portfolio.holdings ?? []).map((h) => h.ticker.toUpperCase());
+    let technicalMap = new Map<string, Signal | null>();
+    if (tickers.length > 0) {
+      try {
+        const techRes = await fetch(`/api/technicals?tickers=${tickers.join(',')}`);
+        const techData = (await techRes.json()) as TechnicalApiResponse;
+        for (const r of techData.results ?? []) {
+          technicalMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+        }
+      } catch (err) {
+        console.warn('[portfolio] technicals fetch failed', err);
+      }
+    }
+
     // Sort by total value descending so the biggest position is on top.
-    const sorted = [...(data.holdings ?? [])].sort((a, b) => {
+    const sorted = [...(portfolio.holdings ?? [])].sort((a, b) => {
       const av = a.value ?? 0;
       const bv = b.value ?? 0;
       return bv - av;
     });
-    setHoldings(sorted);
-    setTotals(data.totals ?? EMPTY_TOTALS);
-    setPricesAsOfDate(data.pricesAsOfDate ?? null);
+
+    const merged: RowState[] = sorted.map((h) => {
+      const tech = technicalMap.get(h.ticker.toUpperCase()) ?? null;
+      const sentSignal = sentimentToSignal(h.sentimentScore);
+      const combined = combineSignals(sentSignal, tech);
+      return { holding: h, technicalSignal: tech, combined };
+    });
+
+    setRows(merged);
+    setTotals(portfolio.totals ?? EMPTY_TOTALS);
+    setPricesAsOfDate(portfolio.pricesAsOfDate ?? null);
   }, []);
 
-  // Initial load.
+  // Initial load
   useEffect(() => {
-    fetch('/api/portfolio')
-      .then((r) => r.json())
-      .then((data) => applyResponse(data as PortfolioApiResponse))
+    refreshAll()
       .catch((err) => setError((err as Error).message))
       .finally(() => setLoading(false));
-  }, [applyResponse]);
+  }, [refreshAll]);
 
-  // Replace the entire holdings array server-side, then refetch the
-  // enriched view so prices/totals stay in sync.
+  // Replace the entire holdings array server-side, then refetch.
   async function updateHoldings(next: Array<{ ticker: string; shares: number }>): Promise<void> {
     setMutating(true);
     setError(null);
@@ -79,9 +127,7 @@ export default function PortfolioView() {
       if (!res.ok) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
-      // PUT returns just { holdings }; refetch GET to get enrichment + totals.
-      const enriched = await fetch('/api/portfolio').then((r) => r.json());
-      applyResponse(enriched as PortfolioApiResponse);
+      await refreshAll();
     } catch (err) {
       setError((err as Error).message);
       throw err;
@@ -103,13 +149,13 @@ export default function PortfolioView() {
       setError('Shares must be a positive number.');
       return;
     }
-    if (holdings.some((h) => h.ticker === ticker)) {
+    if (rows.some((r) => r.holding.ticker === ticker)) {
       setError(`${ticker} is already in your portfolio. Remove it first to change the share count.`);
       return;
     }
 
     const next = [
-      ...holdings.map((h) => ({ ticker: h.ticker, shares: h.shares })),
+      ...rows.map((r) => ({ ticker: r.holding.ticker, shares: r.holding.shares })),
       { ticker, shares: sharesNum },
     ];
     try {
@@ -118,18 +164,18 @@ export default function PortfolioView() {
       setNewShares('');
       tickerInputRef.current?.focus();
     } catch {
-      // Error surfaced via setError in updateHoldings.
+      // surfaced via setError
     }
   }
 
   async function removeHolding(ticker: string) {
-    const next = holdings
-      .filter((h) => h.ticker !== ticker)
-      .map((h) => ({ ticker: h.ticker, shares: h.shares }));
+    const next = rows
+      .filter((r) => r.holding.ticker !== ticker)
+      .map((r) => ({ ticker: r.holding.ticker, shares: r.holding.shares }));
     try {
       await updateHoldings(next);
     } catch {
-      // Error surfaced via setError.
+      // surfaced via setError
     }
   }
 
@@ -174,8 +220,8 @@ export default function PortfolioView() {
         </div>
       </header>
 
-      {/* Totals strip — only shown when there are holdings with prices. */}
-      {holdings.length > 0 && totals.value != null && (
+      {/* Totals strip */}
+      {rows.length > 0 && totals.value != null && (
         <div className="mb-4 grid grid-cols-3 gap-3 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-3">
           <Totals label="Total value" value={formatCurrency(totals.value)} />
           <Totals
@@ -260,85 +306,176 @@ export default function PortfolioView() {
 
       {loading ? (
         <p className="text-sm text-zinc-500">Loading…</p>
-      ) : holdings.length === 0 ? (
+      ) : rows.length === 0 ? (
         <p className="text-sm text-zinc-500">
           Your portfolio is empty. Click <Plus className="inline h-3 w-3" /> above to
           add a holding.
         </p>
       ) : (
-        <table className="w-full text-sm">
-          <thead className="text-xs text-zinc-500">
-            <tr>
-              <th className="pb-2 text-left">Ticker</th>
-              <th className="pb-2 text-right">Shares</th>
-              <th className="pb-2 text-right">Close</th>
-              <th className="pb-2 text-right">Day %</th>
-              <th className="pb-2 text-right">Value</th>
-              <th className="pb-2 text-right">Sentiment</th>
-              <th className="pb-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {holdings.map((h) => (
-              <tr key={h.ticker} className="group border-t border-zinc-800/50">
-                <td className="py-2 font-medium">{h.ticker}</td>
-                <td className="py-2 text-right font-mono text-zinc-300">{h.shares}</td>
-                <td className="py-2 text-right font-mono text-zinc-300">
-                  {h.lastClose != null ? `$${h.lastClose.toFixed(2)}` : '—'}
-                </td>
-                <td
-                  className={`py-2 text-right font-mono ${
-                    h.dayChangePercent == null
-                      ? 'text-zinc-500'
-                      : h.dayChangePercent > 0
-                        ? 'text-green-400'
-                        : h.dayChangePercent < 0
-                          ? 'text-red-400'
-                          : 'text-zinc-500'
-                  }`}
-                >
-                  {h.dayChangePercent != null
-                    ? `${h.dayChangePercent > 0 ? '+' : ''}${h.dayChangePercent.toFixed(2)}%`
-                    : '—'}
-                </td>
-                <td className="py-2 text-right font-mono text-zinc-200">
-                  {h.value != null ? formatCurrency(h.value) : '—'}
-                </td>
-                <td
-                  className={`py-2 text-right font-mono ${
-                    h.sentimentScore > 0
-                      ? 'text-green-400'
-                      : h.sentimentScore < 0
-                        ? 'text-red-400'
-                        : 'text-zinc-500'
-                  }`}
-                >
-                  {h.sentimentScore !== 0
-                    ? `${h.sentimentScore > 0 ? '+' : ''}${h.sentimentScore.toFixed(2)}`
-                    : '—'}
-                </td>
-                <td className="py-2 pl-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => removeHolding(h.ticker)}
-                    disabled={mutating}
-                    title={`Remove ${h.ticker}`}
-                    aria-label={`Remove ${h.ticker} from portfolio`}
-                    className="rounded p-1 text-zinc-700 opacity-0 transition hover:bg-zinc-900 hover:text-red-400 group-hover:opacity-100 disabled:cursor-not-allowed"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </td>
+        <>
+          {/* Desktop table */}
+          <table className="hidden w-full text-sm md:table">
+            <thead className="text-xs text-zinc-500">
+              <tr>
+                <th className="pb-2 text-left">Ticker</th>
+                <th className="pb-2 text-right">Shares</th>
+                <th className="pb-2 text-right">Close</th>
+                <th className="pb-2 text-right">Day %</th>
+                <th className="pb-2 text-right">Value</th>
+                <th className="pb-2 text-right">Sent</th>
+                <th className="pb-2 text-right">Tech</th>
+                <th className="pb-2 border-l border-zinc-800/60 pl-3 text-right">Combined</th>
+                <th className="pb-2"></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const h = r.holding;
+                return (
+                  <tr key={h.ticker} className="group border-t border-zinc-800/50">
+                    <td className="py-2 font-medium">{h.ticker}</td>
+                    <td className="py-2 text-right font-mono text-zinc-300">{h.shares}</td>
+                    <td className="py-2 text-right font-mono text-zinc-300">
+                      {h.lastClose != null ? `$${h.lastClose.toFixed(2)}` : '—'}
+                    </td>
+                    <td
+                      className={`py-2 text-right font-mono ${
+                        h.dayChangePercent == null
+                          ? 'text-zinc-500'
+                          : h.dayChangePercent > 0
+                            ? 'text-green-400'
+                            : h.dayChangePercent < 0
+                              ? 'text-red-400'
+                              : 'text-zinc-500'
+                      }`}
+                    >
+                      {h.dayChangePercent != null
+                        ? `${h.dayChangePercent > 0 ? '+' : ''}${h.dayChangePercent.toFixed(2)}%`
+                        : '—'}
+                    </td>
+                    <td className="py-2 text-right font-mono text-zinc-200">
+                      {h.value != null ? formatCurrency(h.value) : '—'}
+                    </td>
+                    <td className="py-2 text-right">
+                      <SignalBadge
+                        signal={
+                          h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null
+                        }
+                        title={
+                          h.sentimentScore !== 0
+                            ? `Sentiment score: ${h.sentimentScore.toFixed(2)}`
+                            : 'No sentiment scan yet'
+                        }
+                      />
+                    </td>
+                    <td className="py-2 text-right">
+                      <SignalBadge
+                        signal={r.technicalSignal}
+                        title={
+                          r.technicalSignal
+                            ? `Technical signal: ${r.technicalSignal} (SMA/EMA/RSI/MACD/Bollinger majority)`
+                            : 'Insufficient price history'
+                        }
+                      />
+                    </td>
+                    <td className="border-l border-zinc-800/60 bg-zinc-900/20 py-2 pl-3 text-right">
+                      <CombinedBadge signal={r.combined} />
+                    </td>
+                    <td className="py-2 pl-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeHolding(h.ticker)}
+                        disabled={mutating}
+                        title={`Remove ${h.ticker}`}
+                        aria-label={`Remove ${h.ticker} from portfolio`}
+                        className="rounded p-1 text-zinc-700 opacity-0 transition hover:bg-zinc-900 hover:text-red-400 group-hover:opacity-100 disabled:cursor-not-allowed"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          {/* Mobile card layout — two rows per holding */}
+          <div className="space-y-3 md:hidden">
+            {rows.map((r) => {
+              const h = r.holding;
+              const sentSig = h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null;
+              return (
+                <div
+                  key={h.ticker}
+                  className="rounded-lg border border-zinc-800/50 bg-zinc-900/30 p-3"
+                >
+                  {/* Row 1: ticker + value + combined */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="font-semibold text-zinc-100">{h.ticker}</p>
+                      <p className="text-xs text-zinc-500">
+                        {h.shares} {h.shares === 1 ? 'share' : 'shares'}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="text-right">
+                        <p className="font-mono text-sm text-zinc-100">
+                          {h.value != null ? formatCurrency(h.value) : '—'}
+                        </p>
+                        <p
+                          className={`font-mono text-xs ${
+                            h.dayChangePercent == null
+                              ? 'text-zinc-500'
+                              : h.dayChangePercent > 0
+                                ? 'text-green-400'
+                                : h.dayChangePercent < 0
+                                  ? 'text-red-400'
+                                  : 'text-zinc-500'
+                          }`}
+                        >
+                          {h.dayChangePercent != null
+                            ? `${h.dayChangePercent > 0 ? '+' : ''}${h.dayChangePercent.toFixed(2)}%`
+                            : '—'}
+                        </p>
+                      </div>
+                      <CombinedBadge signal={r.combined} />
+                    </div>
+                  </div>
+                  {/* Row 2: individual signals + remove */}
+                  <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/40 pt-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase tracking-wide text-zinc-600">
+                        Sent
+                      </span>
+                      <SignalBadge signal={sentSig} />
+                      <span className="ml-2 text-[10px] uppercase tracking-wide text-zinc-600">
+                        Tech
+                      </span>
+                      <SignalBadge signal={r.technicalSignal} />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeHolding(h.ticker)}
+                      disabled={mutating}
+                      title={`Remove ${h.ticker}`}
+                      aria-label={`Remove ${h.ticker} from portfolio`}
+                      className="rounded p-1 text-zinc-600 transition hover:bg-zinc-900 hover:text-red-400 disabled:cursor-not-allowed"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
 
-      {holdings.length > 0 && (
+      {rows.length > 0 && (
         <p className="mt-3 text-[11px] text-zinc-600">
-          Prices are end-of-day from Polygon, not real-time. Sentiment is from your
-          watchlist scan. xBullRadar is a sentiment dashboard, not a brokerage.
+          Prices are end-of-day from Polygon, not real-time. Sentiment is from Grok x_search.
+          Technical signal aggregates SMA, EMA, RSI, MACD, and Bollinger Bands. Combined is a
+          majority vote across signals — informational only, <strong>not investment advice</strong>.
         </p>
       )}
     </section>

@@ -2,12 +2,34 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Plus, RefreshCw, TrendingUp, X } from 'lucide-react';
+import {
+  CombinedBadge,
+  SignalBadge,
+  combineSignals,
+  sentimentToSignal,
+  type Signal,
+  type CombinedSignal,
+} from '@/components/dashboard/SignalBadge';
 import type { StockSentiment } from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
 
+interface TechnicalApiResponse {
+  results: Array<{
+    ticker: string;
+    signal: { signal: Signal } | null;
+    asOfDate: string | null;
+  }>;
+}
+
+interface RowState {
+  sentiment: StockSentiment;
+  technicalSignal: Signal | null;
+  combined: CombinedSignal | null;
+}
+
 export default function TrendingStocks() {
-  const [rows, setRows] = useState<StockSentiment[]>([]);
+  const [rows, setRows] = useState<RowState[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [mutating, setMutating] = useState(false);
@@ -17,30 +39,65 @@ export default function TrendingStocks() {
   const [newTicker, setNewTicker] = useState('');
   const addInputRef = useRef<HTMLInputElement>(null);
 
-  // Sort by absolute score so the most "interesting" movement (in either
-  // direction) lands at the top.
-  const applyResults = useCallback((results: StockSentiment[]) => {
-    const sorted = [...results].sort(
-      (a, b) => Math.abs(b.score) - Math.abs(a.score),
-    );
-    setRows(sorted);
+  const mergeRows = useCallback(
+    (sentiments: StockSentiment[], technicalMap: Map<string, Signal | null>): RowState[] => {
+      // Sort by absolute sentiment score so the most "interesting" movement
+      // (in either direction) lands at the top.
+      const sorted = [...sentiments].sort(
+        (a, b) => Math.abs(b.score) - Math.abs(a.score),
+      );
+      return sorted.map((s) => {
+        const tech = technicalMap.get(s.ticker.toUpperCase()) ?? null;
+        const sentSignal = s.score !== 0 ? sentimentToSignal(s.score) : null;
+        return {
+          sentiment: s,
+          technicalSignal: tech,
+          combined: combineSignals(sentSignal, tech),
+        };
+      });
+    },
+    [],
+  );
+
+  const fetchTechnicals = useCallback(async (tickers: string[]) => {
+    const map = new Map<string, Signal | null>();
+    if (tickers.length === 0) return map;
+    try {
+      const res = await fetch(`/api/technicals?tickers=${tickers.join(',')}`);
+      const data = (await res.json()) as TechnicalApiResponse;
+      for (const r of data.results ?? []) {
+        map.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+      }
+    } catch (err) {
+      console.warn('[trending] technicals fetch failed', err);
+    }
+    return map;
   }, []);
 
   // Initial load: cheap GET reads last-known scores from disk (no Grok call).
   useEffect(() => {
-    fetch('/api/sentiment/batch')
-      .then((r) => r.json())
-      .then((data) => {
-        applyResults(data.results ?? []);
-        if (data.results?.some((r: StockSentiment) => r.score !== 0)) {
+    (async () => {
+      try {
+        const res = await fetch('/api/sentiment/batch');
+        const data = await res.json();
+        const sentiments: StockSentiment[] = data.results ?? [];
+        const tickers = sentiments.map((s) => s.ticker.toUpperCase());
+        const techMap = await fetchTechnicals(tickers);
+        setRows(mergeRows(sentiments, techMap));
+        if (sentiments.some((r) => r.score !== 0)) {
           setLastUpdated(new Date());
         }
-      })
-      .finally(() => setLoading(false));
-  }, [applyResults]);
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [fetchTechnicals, mergeRows]);
 
   // Manual refresh: POST triggers a real Grok batch call and persists results
-  // server-side. Costs ~one batch call + one x_search invocation.
+  // server-side. Costs ~one batch call + one x_search invocation. Then re-pull
+  // technicals for the (possibly new) ticker set.
   async function refresh() {
     if (refreshing) return;
     setRefreshing(true);
@@ -51,7 +108,10 @@ export default function TrendingStocks() {
       if (!res.ok) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
-      applyResults(data.results ?? []);
+      const sentiments: StockSentiment[] = data.results ?? [];
+      const tickers = sentiments.map((s) => s.ticker.toUpperCase());
+      const techMap = await fetchTechnicals(tickers);
+      setRows(mergeRows(sentiments, techMap));
       setLastUpdated(new Date());
     } catch (err) {
       setError((err as Error).message);
@@ -60,15 +120,18 @@ export default function TrendingStocks() {
     }
   }
 
-  // Reload sentiment data without triggering a Grok call. Used after
-  // mutating the watchlist so the table reflects the new shape.
+  // Reload sentiment+technicals data without triggering a Grok call. Used
+  // after mutating the watchlist so the table reflects the new shape.
   async function reloadSentiment() {
     const res = await fetch('/api/sentiment/batch');
     const data = await res.json();
     if (!res.ok) {
       throw new Error(data?.error || `HTTP ${res.status}`);
     }
-    applyResults(data.results ?? []);
+    const sentiments: StockSentiment[] = data.results ?? [];
+    const tickers = sentiments.map((s) => s.ticker.toUpperCase());
+    const techMap = await fetchTechnicals(tickers);
+    setRows(mergeRows(sentiments, techMap));
   }
 
   // Replace the entire watchlist server-side, then refetch the table data.
@@ -102,35 +165,33 @@ export default function TrendingStocks() {
       setError(`"${newTicker.trim()}" is not a valid ticker. Use 1-10 letters only.`);
       return;
     }
-    if (rows.some((r) => r.ticker === ticker)) {
+    if (rows.some((r) => r.sentiment.ticker === ticker)) {
       setError(`${ticker} is already in your watchlist.`);
       return;
     }
 
-    const newList = [...rows.map((r) => r.ticker), ticker];
+    const newList = [...rows.map((r) => r.sentiment.ticker), ticker];
     try {
       await updateWatchlist(newList);
       setNewTicker('');
-      // Keep focus on the input so the user can add another ticker quickly.
       addInputRef.current?.focus();
     } catch {
-      // Error already surfaced via setError in updateWatchlist.
+      // surfaced via setError
     }
   }
 
   async function removeTicker(ticker: string) {
-    const newList = rows.map((r) => r.ticker).filter((t) => t !== ticker);
+    const newList = rows.map((r) => r.sentiment.ticker).filter((t) => t !== ticker);
     try {
       await updateWatchlist(newList);
     } catch {
-      // Error already surfaced via setError.
+      // surfaced via setError
     }
   }
 
   function startAdding() {
     setAdding(true);
     setError(null);
-    // Focus the input on next paint, after it's mounted.
     setTimeout(() => addInputRef.current?.focus(), 0);
   }
 
@@ -223,46 +284,122 @@ export default function TrendingStocks() {
           to add a ticker.
         </p>
       ) : (
-        <table className="w-full text-sm">
-          <thead className="text-xs text-zinc-500">
-            <tr>
-              <th className="pb-2 text-left">Ticker</th>
-              <th className="pb-2 text-left">Reasoning</th>
-              <th className="pb-2 text-right">Sentiment</th>
-              <th className="pb-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.ticker} className="group border-t border-zinc-800/50">
-                <td className="py-2 font-medium">{row.ticker}</td>
-                <td className="py-2 text-zinc-400">
-                  <span className="line-clamp-1">{row.reasoning || '—'}</span>
-                </td>
-                <td
-                  className={`py-2 text-right font-mono ${
-                    row.score > 0 ? 'text-green-400' : row.score < 0 ? 'text-red-400' : 'text-zinc-500'
-                  }`}
-                >
-                  {row.score > 0 ? '+' : ''}
-                  {row.score.toFixed(2)}
-                </td>
-                <td className="py-2 pl-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => removeTicker(row.ticker)}
-                    disabled={mutating}
-                    title={`Remove ${row.ticker}`}
-                    aria-label={`Remove ${row.ticker} from watchlist`}
-                    className="rounded p-1 text-zinc-700 opacity-0 transition hover:bg-zinc-900 hover:text-red-400 group-hover:opacity-100 disabled:cursor-not-allowed"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </td>
+        <>
+          {/* Desktop table */}
+          <table className="hidden w-full text-sm md:table">
+            <thead className="text-xs text-zinc-500">
+              <tr>
+                <th className="pb-2 text-left">Ticker</th>
+                <th className="pb-2 text-left">Reasoning</th>
+                <th className="pb-2 text-right">Sent</th>
+                <th className="pb-2 text-right">Tech</th>
+                <th className="pb-2 border-l border-zinc-800/60 pl-3 text-right">Combined</th>
+                <th className="pb-2"></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.sentiment.ticker} className="group border-t border-zinc-800/50">
+                  <td className="py-2 font-medium">{r.sentiment.ticker}</td>
+                  <td className="py-2 text-zinc-400">
+                    <span className="line-clamp-1">{r.sentiment.reasoning || '—'}</span>
+                  </td>
+                  <td className="py-2 text-right">
+                    <SignalBadge
+                      signal={r.sentiment.score !== 0 ? sentimentToSignal(r.sentiment.score) : null}
+                      title={
+                        r.sentiment.score !== 0
+                          ? `Sentiment score: ${r.sentiment.score.toFixed(2)}`
+                          : 'No sentiment scan yet'
+                      }
+                    />
+                  </td>
+                  <td className="py-2 text-right">
+                    <SignalBadge
+                      signal={r.technicalSignal}
+                      title={
+                        r.technicalSignal
+                          ? `Technical: ${r.technicalSignal} (SMA/EMA/RSI/MACD/Bollinger majority)`
+                          : 'Insufficient price history'
+                      }
+                    />
+                  </td>
+                  <td className="border-l border-zinc-800/60 bg-zinc-900/20 py-2 pl-3 text-right">
+                    <CombinedBadge signal={r.combined} />
+                  </td>
+                  <td className="py-2 pl-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => removeTicker(r.sentiment.ticker)}
+                      disabled={mutating}
+                      title={`Remove ${r.sentiment.ticker}`}
+                      aria-label={`Remove ${r.sentiment.ticker} from watchlist`}
+                      className="rounded p-1 text-zinc-700 opacity-0 transition hover:bg-zinc-900 hover:text-red-400 group-hover:opacity-100 disabled:cursor-not-allowed"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Mobile card layout — two rows per ticker */}
+          <div className="space-y-3 md:hidden">
+            {rows.map((r) => {
+              const sentSig =
+                r.sentiment.score !== 0 ? sentimentToSignal(r.sentiment.score) : null;
+              return (
+                <div
+                  key={r.sentiment.ticker}
+                  className="rounded-lg border border-zinc-800/50 bg-zinc-900/30 p-3"
+                >
+                  {/* Row 1: ticker + reasoning + combined */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold text-zinc-100">{r.sentiment.ticker}</p>
+                      <p className="mt-0.5 line-clamp-2 text-xs text-zinc-500">
+                        {r.sentiment.reasoning || '—'}
+                      </p>
+                    </div>
+                    <CombinedBadge signal={r.combined} />
+                  </div>
+                  {/* Row 2: individual signals + remove */}
+                  <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/40 pt-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase tracking-wide text-zinc-600">
+                        Sent
+                      </span>
+                      <SignalBadge signal={sentSig} />
+                      <span className="ml-2 text-[10px] uppercase tracking-wide text-zinc-600">
+                        Tech
+                      </span>
+                      <SignalBadge signal={r.technicalSignal} />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeTicker(r.sentiment.ticker)}
+                      disabled={mutating}
+                      title={`Remove ${r.sentiment.ticker}`}
+                      aria-label={`Remove ${r.sentiment.ticker} from watchlist`}
+                      className="rounded p-1 text-zinc-600 transition hover:bg-zinc-900 hover:text-red-400 disabled:cursor-not-allowed"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {rows.length > 0 && (
+        <p className="mt-3 text-[11px] text-zinc-600">
+          Sentiment from Grok x_search. Technical signal aggregates SMA, EMA, RSI, MACD,
+          and Bollinger Bands. Combined is a majority vote — informational only,{' '}
+          <strong>not investment advice</strong>.
+        </p>
       )}
     </section>
   );
