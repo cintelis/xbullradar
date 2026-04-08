@@ -17,3 +17,10 @@ data/
 .vscode
 next-env.d.ts
 tsconfig.tsbuildinfo
+
+# Claude Code workspace
+.claude/
+
+# Serwist build artifacts (regenerated on every build)
+public/sw.js
+public/swe-worker-*.js
