@@ -4,6 +4,7 @@ import { store } from '@/lib/store';
 import { detectAlert, sendAlert } from '@/lib/alerts';
 import { refreshDailyPrices, refreshHistoricalCloses } from '@/lib/prices';
 import { refreshFundamentalSignal } from '@/lib/fundamentals';
+import { refreshMarkets } from '@/lib/markets';
 
 export const runtime = 'nodejs';
 
@@ -38,6 +39,18 @@ async function runScan() {
     console.log(`[daily/scan] refreshed price cache, asOfDate=${prices.asOfDate}`);
   } catch (err) {
     console.error('[daily/scan] price cache refresh failed', err);
+  }
+
+  // Refresh the markets cache (commodities + exchange hours) so the
+  // dashboard ticker strip is fresh for morning users. Non-fatal —
+  // strip is decorative.
+  try {
+    const markets = await refreshMarkets();
+    console.log(
+      `[daily/scan] refreshed markets cache, ${markets.commodities.length} commodities, ${markets.exchanges.length} exchanges`,
+    );
+  } catch (err) {
+    console.error('[daily/scan] markets cache refresh failed', err);
   }
 
   const userIds = await store.listUserIds();

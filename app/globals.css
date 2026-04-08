@@ -19,3 +19,24 @@ html, body {
 * {
   border-color: var(--color-border);
 }
+
+/* Ticker tape marquee — used by components/dashboard/MarketStrip.tsx.
+   The track contains the items rendered twice in sequence so this -50%
+   translation lands exactly where the duplicate copy began, producing a
+   seamless infinite loop. Pause on hover so users can read a specific
+   ticker without it sliding away. */
+@keyframes ticker-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+.marquee-track {
+  animation-name: ticker-marquee;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+
+.marquee-track:hover {
+  animation-play-state: paused;
+}

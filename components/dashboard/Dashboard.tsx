@@ -11,6 +11,7 @@ import BottomNav, { type MobileTab } from '@/components/layout/BottomNav';
 import SentimentRadar from '@/components/dashboard/SentimentRadar';
 import TrendingStocks from '@/components/dashboard/TrendingStocks';
 import PortfolioView from '@/components/dashboard/PortfolioView';
+import MarketStrip from '@/components/dashboard/MarketStrip';
 import CopilotChat from '@/components/copilot/CopilotChat';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 
@@ -25,6 +26,7 @@ export default function Dashboard({ userEmail }: DashboardProps) {
   return (
     <div className="flex h-screen flex-col">
       <TopBar userEmail={userEmail} />
+      <MarketStrip />
 
       <div className="flex flex-1 overflow-hidden">
         {/* Main content */}
