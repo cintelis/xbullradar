@@ -22,9 +22,17 @@ interface TechnicalApiResponse {
   }>;
 }
 
+interface FundamentalApiResponse {
+  results: Array<{
+    ticker: string;
+    signal: { signal: Signal } | null;
+  }>;
+}
+
 interface RowState {
   sentiment: StockSentiment;
   technicalSignal: Signal | null;
+  fundamentalSignal: Signal | null;
   combined: CombinedSignal | null;
 }
 
@@ -40,38 +48,58 @@ export default function TrendingStocks() {
   const addInputRef = useRef<HTMLInputElement>(null);
 
   const mergeRows = useCallback(
-    (sentiments: StockSentiment[], technicalMap: Map<string, Signal | null>): RowState[] => {
+    (
+      sentiments: StockSentiment[],
+      technicalMap: Map<string, Signal | null>,
+      fundamentalMap: Map<string, Signal | null>,
+    ): RowState[] => {
       // Sort by absolute sentiment score so the most "interesting" movement
       // (in either direction) lands at the top.
       const sorted = [...sentiments].sort(
         (a, b) => Math.abs(b.score) - Math.abs(a.score),
       );
       return sorted.map((s) => {
-        const tech = technicalMap.get(s.ticker.toUpperCase()) ?? null;
+        const upper = s.ticker.toUpperCase();
+        const tech = technicalMap.get(upper) ?? null;
+        const fund = fundamentalMap.get(upper) ?? null;
         const sentSignal = s.score !== 0 ? sentimentToSignal(s.score) : null;
         return {
           sentiment: s,
           technicalSignal: tech,
-          combined: combineSignals(sentSignal, tech),
+          fundamentalSignal: fund,
+          combined: combineSignals(sentSignal, tech, fund),
         };
       });
     },
     [],
   );
 
-  const fetchTechnicals = useCallback(async (tickers: string[]) => {
-    const map = new Map<string, Signal | null>();
-    if (tickers.length === 0) return map;
-    try {
-      const res = await fetch(`/api/technicals?tickers=${tickers.join(',')}`);
-      const data = (await res.json()) as TechnicalApiResponse;
-      for (const r of data.results ?? []) {
-        map.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+  // Fetch /api/technicals + /api/fundamentals in parallel for the given
+  // ticker set, returning two maps the merge step uses.
+  const fetchSignals = useCallback(async (tickers: string[]) => {
+    const techMap = new Map<string, Signal | null>();
+    const fundMap = new Map<string, Signal | null>();
+    if (tickers.length === 0) return { techMap, fundMap };
+    const tickersParam = tickers.join(',');
+    const [techRes, fundRes] = await Promise.allSettled([
+      fetch(`/api/technicals?tickers=${tickersParam}`).then((r) => r.json() as Promise<TechnicalApiResponse>),
+      fetch(`/api/fundamentals?tickers=${tickersParam}`).then((r) => r.json() as Promise<FundamentalApiResponse>),
+    ]);
+    if (techRes.status === 'fulfilled') {
+      for (const r of techRes.value.results ?? []) {
+        techMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
       }
-    } catch (err) {
-      console.warn('[trending] technicals fetch failed', err);
+    } else {
+      console.warn('[trending] technicals fetch failed', techRes.reason);
     }
-    return map;
+    if (fundRes.status === 'fulfilled') {
+      for (const r of fundRes.value.results ?? []) {
+        fundMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+      }
+    } else {
+      console.warn('[trending] fundamentals fetch failed', fundRes.reason);
+    }
+    return { techMap, fundMap };
   }, []);
 
   // Initial load: cheap GET reads last-known scores from disk (no Grok call).
@@ -82,8 +110,8 @@ export default function TrendingStocks() {
         const data = await res.json();
         const sentiments: StockSentiment[] = data.results ?? [];
         const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-        const techMap = await fetchTechnicals(tickers);
-        setRows(mergeRows(sentiments, techMap));
+        const { techMap, fundMap } = await fetchSignals(tickers);
+        setRows(mergeRows(sentiments, techMap, fundMap));
         if (sentiments.some((r) => r.score !== 0)) {
           setLastUpdated(new Date());
         }
@@ -93,11 +121,11 @@ export default function TrendingStocks() {
         setLoading(false);
       }
     })();
-  }, [fetchTechnicals, mergeRows]);
+  }, [fetchSignals, mergeRows]);
 
   // Manual refresh: POST triggers a real Grok batch call and persists results
   // server-side. Costs ~one batch call + one x_search invocation. Then re-pull
-  // technicals for the (possibly new) ticker set.
+  // signals for the (possibly new) ticker set.
   async function refresh() {
     if (refreshing) return;
     setRefreshing(true);
@@ -110,8 +138,8 @@ export default function TrendingStocks() {
       }
       const sentiments: StockSentiment[] = data.results ?? [];
       const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-      const techMap = await fetchTechnicals(tickers);
-      setRows(mergeRows(sentiments, techMap));
+      const { techMap, fundMap } = await fetchSignals(tickers);
+      setRows(mergeRows(sentiments, techMap, fundMap));
       setLastUpdated(new Date());
     } catch (err) {
       setError((err as Error).message);
@@ -120,7 +148,7 @@ export default function TrendingStocks() {
     }
   }
 
-  // Reload sentiment+technicals data without triggering a Grok call. Used
+  // Reload sentiment+signals data without triggering a Grok call. Used
   // after mutating the watchlist so the table reflects the new shape.
   async function reloadSentiment() {
     const res = await fetch('/api/sentiment/batch');
@@ -130,8 +158,8 @@ export default function TrendingStocks() {
     }
     const sentiments: StockSentiment[] = data.results ?? [];
     const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-    const techMap = await fetchTechnicals(tickers);
-    setRows(mergeRows(sentiments, techMap));
+    const { techMap, fundMap } = await fetchSignals(tickers);
+    setRows(mergeRows(sentiments, techMap, fundMap));
   }
 
   // Replace the entire watchlist server-side, then refetch the table data.
@@ -293,6 +321,7 @@ export default function TrendingStocks() {
                 <th className="pb-2 text-left">Reasoning</th>
                 <th className="pb-2 text-right">Sent</th>
                 <th className="pb-2 text-right">Tech</th>
+                <th className="pb-2 text-right">Fund</th>
                 <th className="pb-2 border-l border-zinc-800/60 pl-3 text-right">Combined</th>
                 <th className="pb-2"></th>
               </tr>
@@ -321,6 +350,16 @@ export default function TrendingStocks() {
                         r.technicalSignal
                           ? `Technical: ${r.technicalSignal} (SMA/EMA/RSI/MACD/Bollinger majority)`
                           : 'Insufficient price history'
+                      }
+                    />
+                  </td>
+                  <td className="py-2 text-right">
+                    <SignalBadge
+                      signal={r.fundamentalSignal}
+                      title={
+                        r.fundamentalSignal
+                          ? `Fundamentals: ${r.fundamentalSignal} (valuation, profitability, growth, health majority)`
+                          : 'No fundamentals data yet'
                       }
                     />
                   </td>
@@ -366,15 +405,19 @@ export default function TrendingStocks() {
                   </div>
                   {/* Row 2: individual signals + remove */}
                   <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/40 pt-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="text-[10px] uppercase tracking-wide text-zinc-600">
                         Sent
                       </span>
                       <SignalBadge signal={sentSig} />
-                      <span className="ml-2 text-[10px] uppercase tracking-wide text-zinc-600">
+                      <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-600">
                         Tech
                       </span>
                       <SignalBadge signal={r.technicalSignal} />
+                      <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-600">
+                        Fund
+                      </span>
+                      <SignalBadge signal={r.fundamentalSignal} />
                     </div>
                     <button
                       type="button"
@@ -396,8 +439,10 @@ export default function TrendingStocks() {
 
       {rows.length > 0 && (
         <p className="mt-3 text-[11px] text-zinc-600">
-          Sentiment from Grok x_search. Technical signal aggregates SMA, EMA, RSI, MACD,
-          and Bollinger Bands. Combined is a majority vote — informational only,{' '}
+          Sentiment from Grok x_search. Technical signal aggregates SMA, EMA, RSI, MACD, and
+          Bollinger Bands. Fundamental signal aggregates valuation, profitability, growth, and
+          balance-sheet health from FMP data using absolute thresholds (not sector-relative).
+          Combined is a majority vote across all three signals — informational only,{' '}
           <strong>not investment advice</strong>.
         </p>
       )}

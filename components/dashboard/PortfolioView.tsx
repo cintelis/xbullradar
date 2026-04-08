@@ -43,6 +43,13 @@ interface TechnicalApiResponse {
   }>;
 }
 
+interface FundamentalApiResponse {
+  results: Array<{
+    ticker: string;
+    signal: { signal: Signal } | null;
+  }>;
+}
+
 const EMPTY_TOTALS: PortfolioApiResponse['totals'] = {
   value: null,
   dayChangeAmount: null,
@@ -53,6 +60,7 @@ const EMPTY_TOTALS: PortfolioApiResponse['totals'] = {
 interface RowState {
   holding: EnrichedPortfolioHolding;
   technicalSignal: Signal | null;
+  fundamentalSignal: Signal | null;
   combined: CombinedSignal | null;
 }
 
@@ -68,22 +76,35 @@ export default function PortfolioView() {
   const [newShares, setNewShares] = useState('');
   const tickerInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch /api/portfolio + /api/technicals in parallel and merge into row state.
+  // Fetch /api/portfolio + /api/technicals + /api/fundamentals in parallel
+  // and merge all three into row state.
   const refreshAll = useCallback(async () => {
-    const portfolioP = fetch('/api/portfolio').then((r) => r.json() as Promise<PortfolioApiResponse>);
-    const portfolio = await portfolioP;
+    const portfolio = (await fetch('/api/portfolio').then((r) => r.json())) as PortfolioApiResponse;
 
     const tickers = (portfolio.holdings ?? []).map((h) => h.ticker.toUpperCase());
-    let technicalMap = new Map<string, Signal | null>();
+    const technicalMap = new Map<string, Signal | null>();
+    const fundamentalMap = new Map<string, Signal | null>();
+
     if (tickers.length > 0) {
-      try {
-        const techRes = await fetch(`/api/technicals?tickers=${tickers.join(',')}`);
-        const techData = (await techRes.json()) as TechnicalApiResponse;
-        for (const r of techData.results ?? []) {
+      const tickersParam = tickers.join(',');
+      const [techRes, fundRes] = await Promise.allSettled([
+        fetch(`/api/technicals?tickers=${tickersParam}`).then((r) => r.json() as Promise<TechnicalApiResponse>),
+        fetch(`/api/fundamentals?tickers=${tickersParam}`).then((r) => r.json() as Promise<FundamentalApiResponse>),
+      ]);
+
+      if (techRes.status === 'fulfilled') {
+        for (const r of techRes.value.results ?? []) {
           technicalMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
         }
-      } catch (err) {
-        console.warn('[portfolio] technicals fetch failed', err);
+      } else {
+        console.warn('[portfolio] technicals fetch failed', techRes.reason);
+      }
+      if (fundRes.status === 'fulfilled') {
+        for (const r of fundRes.value.results ?? []) {
+          fundamentalMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+        }
+      } else {
+        console.warn('[portfolio] fundamentals fetch failed', fundRes.reason);
       }
     }
 
@@ -95,10 +116,12 @@ export default function PortfolioView() {
     });
 
     const merged: RowState[] = sorted.map((h) => {
-      const tech = technicalMap.get(h.ticker.toUpperCase()) ?? null;
-      const sentSignal = sentimentToSignal(h.sentimentScore);
-      const combined = combineSignals(sentSignal, tech);
-      return { holding: h, technicalSignal: tech, combined };
+      const upper = h.ticker.toUpperCase();
+      const tech = technicalMap.get(upper) ?? null;
+      const fund = fundamentalMap.get(upper) ?? null;
+      const sentSignal = h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null;
+      const combined = combineSignals(sentSignal, tech, fund);
+      return { holding: h, technicalSignal: tech, fundamentalSignal: fund, combined };
     });
 
     setRows(merged);
@@ -324,6 +347,7 @@ export default function PortfolioView() {
                 <th className="pb-2 text-right">Value</th>
                 <th className="pb-2 text-right">Sent</th>
                 <th className="pb-2 text-right">Tech</th>
+                <th className="pb-2 text-right">Fund</th>
                 <th className="pb-2 border-l border-zinc-800/60 pl-3 text-right">Combined</th>
                 <th className="pb-2"></th>
               </tr>
@@ -331,6 +355,7 @@ export default function PortfolioView() {
             <tbody>
               {rows.map((r) => {
                 const h = r.holding;
+                const sentSig = h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null;
                 return (
                   <tr key={h.ticker} className="group border-t border-zinc-800/50">
                     <td className="py-2 font-medium">{h.ticker}</td>
@@ -358,9 +383,7 @@ export default function PortfolioView() {
                     </td>
                     <td className="py-2 text-right">
                       <SignalBadge
-                        signal={
-                          h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null
-                        }
+                        signal={sentSig}
                         title={
                           h.sentimentScore !== 0
                             ? `Sentiment score: ${h.sentimentScore.toFixed(2)}`
@@ -373,8 +396,18 @@ export default function PortfolioView() {
                         signal={r.technicalSignal}
                         title={
                           r.technicalSignal
-                            ? `Technical signal: ${r.technicalSignal} (SMA/EMA/RSI/MACD/Bollinger majority)`
+                            ? `Technical: ${r.technicalSignal} (SMA/EMA/RSI/MACD/Bollinger majority)`
                             : 'Insufficient price history'
+                        }
+                      />
+                    </td>
+                    <td className="py-2 text-right">
+                      <SignalBadge
+                        signal={r.fundamentalSignal}
+                        title={
+                          r.fundamentalSignal
+                            ? `Fundamentals: ${r.fundamentalSignal} (valuation, profitability, growth, health majority)`
+                            : 'No fundamentals data yet'
                         }
                       />
                     </td>
@@ -443,15 +476,19 @@ export default function PortfolioView() {
                   </div>
                   {/* Row 2: individual signals + remove */}
                   <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/40 pt-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="text-[10px] uppercase tracking-wide text-zinc-600">
                         Sent
                       </span>
                       <SignalBadge signal={sentSig} />
-                      <span className="ml-2 text-[10px] uppercase tracking-wide text-zinc-600">
+                      <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-600">
                         Tech
                       </span>
                       <SignalBadge signal={r.technicalSignal} />
+                      <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-600">
+                        Fund
+                      </span>
+                      <SignalBadge signal={r.fundamentalSignal} />
                     </div>
                     <button
                       type="button"
@@ -474,8 +511,10 @@ export default function PortfolioView() {
       {rows.length > 0 && (
         <p className="mt-3 text-[11px] text-zinc-600">
           Prices are end-of-day from Polygon, not real-time. Sentiment is from Grok x_search.
-          Technical signal aggregates SMA, EMA, RSI, MACD, and Bollinger Bands. Combined is a
-          majority vote across signals — informational only, <strong>not investment advice</strong>.
+          Technical signal aggregates SMA, EMA, RSI, MACD, and Bollinger Bands. Fundamental
+          signal aggregates valuation, profitability, growth, and balance-sheet health from FMP
+          data using absolute thresholds (not sector-relative). Combined is a majority vote
+          across all three signals — informational only, <strong>not investment advice</strong>.
         </p>
       )}
     </section>
