@@ -2,6 +2,7 @@ import type { NextRequest } from 'next/server';
 import { analyzeTickersBatch } from '@/lib/sentiment';
 import { store } from '@/lib/store';
 import { detectAlert, sendAlert } from '@/lib/alerts';
+import { refreshDailyPrices } from '@/lib/prices';
 
 export const runtime = 'nodejs';
 
@@ -28,6 +29,16 @@ function isAuthorized(request: NextRequest): boolean {
 }
 
 async function runScan() {
+  // Refresh the price cache once per scan so portfolio views see fresh
+  // end-of-day prices on the next request. Don't fail the whole scan if
+  // Polygon is down — sentiment is the priority, prices are nice-to-have.
+  try {
+    const prices = await refreshDailyPrices();
+    console.log(`[daily/scan] refreshed price cache, asOfDate=${prices.asOfDate}`);
+  } catch (err) {
+    console.error('[daily/scan] price cache refresh failed', err);
+  }
+
   const userIds = await store.listUserIds();
   if (userIds.length === 0) {
     return {

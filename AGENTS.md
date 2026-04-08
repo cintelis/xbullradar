@@ -41,6 +41,7 @@ All env vars live in `.env` locally (gitignored) and in Vercel project settings 
 | `ALLOWED_EMAILS` | prod | Comma- or space-separated list of emails permitted to sign in. Empty/unset = anyone (intentional for local dev). |
 | `SESSION_TTL_HOURS` | no | Session lifetime. Default `24` |
 | `NEXT_PUBLIC_APP_URL` | no | Override the app URL used in magic link emails. Defaults to Vercel's `VERCEL_URL` or `http://localhost:3000` |
+| `POLYGON_API_KEY` | yes (for portfolio) | Polygon (now Massive) API key for end-of-day stock prices. Stocks Basic free tier is sufficient. Used by `lib/prices.ts` to populate the portfolio's price column. |
 
 ## Sentiment Scoring
 
