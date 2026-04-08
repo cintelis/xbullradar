@@ -9,7 +9,10 @@
 // and C:\code\adsoptimiser-tiktok\src\worker\src\services\email.ts.
 
 const DEFAULT_EMAIL_API_URL = 'https://email.365softlabs.com/api/send';
-const DEFAULT_EMAIL_FROM = 'support@365softlabs.com';
+// admin@xbullradar.com is a real mailbox in the M365 tenant the email worker
+// authenticates to; the app principal has Mail.Send permission for it.
+// Override via EMAIL_FROM env var if you ever need a different sender.
+const DEFAULT_EMAIL_FROM = 'admin@xbullradar.com';
 
 interface SendEmailInput {
   to: string;

@@ -34,6 +34,13 @@ All env vars live in `.env` locally (gitignored) and in Vercel project settings 
 | `BULLISH_THRESHOLD` | no | Default `0.5` |
 | `BEARISH_THRESHOLD` | no | Default `-0.5` |
 | `XBULLRADAR_STORE_PATH` | no | Override JsonFileStore path (local dev only). Default `./data/store.json` |
+| `EMAIL_API_URL` | no | Email worker endpoint. Default `https://email.365softlabs.com/api/send` |
+| `EMAIL_FROM` | no | Sender for magic link emails. Default `admin@xbullradar.com` |
+| `CF_ACCESS_CLIENT_ID` | prod | Cloudflare Access service token ID for the email worker |
+| `CF_ACCESS_CLIENT_SECRET` | prod | Paired secret for the CF Access service token |
+| `ALLOWED_EMAILS` | prod | Comma- or space-separated list of emails permitted to sign in. Empty/unset = anyone (intentional for local dev). |
+| `SESSION_TTL_HOURS` | no | Session lifetime. Default `24` |
+| `NEXT_PUBLIC_APP_URL` | no | Override the app URL used in magic link emails. Defaults to Vercel's `VERCEL_URL` or `http://localhost:3000` |
 
 ## Sentiment Scoring
 
