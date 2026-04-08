@@ -1,4 +1,5 @@
-import { Activity, LogOut } from 'lucide-react';
+import { Activity } from 'lucide-react';
+import UserMenu from './UserMenu';
 
 interface TopBarProps {
   userEmail?: string;
@@ -23,29 +24,7 @@ export default function TopBar({ userEmail }: TopBarProps) {
           Live
         </span>
 
-        {userEmail && (
-          <>
-            <span
-              className="hidden max-w-[220px] truncate text-xs text-zinc-500 md:inline"
-              title={userEmail}
-            >
-              {userEmail}
-            </span>
-            {/* Sign-out is a POST so it can't be triggered by an <a href> or
-                browser prefetch. Native form submit avoids needing JS for the
-                hot path of "sign me out." */}
-            <form action="/api/auth/signout" method="POST">
-              <button
-                type="submit"
-                title="Sign out"
-                aria-label="Sign out"
-                className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200"
-              >
-                <LogOut className="h-4 w-4" />
-              </button>
-            </form>
-          </>
-        )}
+        {userEmail && <UserMenu email={userEmail} />}
       </div>
     </header>
   );
