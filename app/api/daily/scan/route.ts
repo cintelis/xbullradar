@@ -3,6 +3,7 @@ import { analyzeTickersBatch } from '@/lib/sentiment';
 import { store } from '@/lib/store';
 import { detectAlert, sendAlert } from '@/lib/alerts';
 import { refreshDailyPrices, refreshHistoricalCloses } from '@/lib/prices';
+import { refreshFundamentalSignal } from '@/lib/fundamentals';
 
 export const runtime = 'nodejs';
 
@@ -101,6 +102,17 @@ async function runScan() {
           await refreshHistoricalCloses(ticker);
         } catch (err) {
           console.warn(`[daily/scan] history refresh failed for ${ticker}:`, err);
+        }
+      }
+
+      // Warm the fundamentals cache for each ticker. 2 FMP calls per ticker
+      // (key-metrics-ttm + ratios-ttm). Cached for 48h, so this only does
+      // real work every other day. Failures non-fatal.
+      for (const ticker of watchlist) {
+        try {
+          await refreshFundamentalSignal(ticker);
+        } catch (err) {
+          console.warn(`[daily/scan] fundamentals refresh failed for ${ticker}:`, err);
         }
       }
     } catch (err) {

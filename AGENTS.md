@@ -41,7 +41,8 @@ All env vars live in `.env` locally (gitignored) and in Vercel project settings 
 | `ALLOWED_EMAILS` | prod | Comma- or space-separated list of emails permitted to sign in. Empty/unset = anyone (intentional for local dev). |
 | `SESSION_TTL_HOURS` | no | Session lifetime. Default `24` |
 | `NEXT_PUBLIC_APP_URL` | no | Override the app URL used in magic link emails. Defaults to Vercel's `VERCEL_URL` or `http://localhost:3000` |
-| `POLYGON_API_KEY` | yes (for portfolio) | Polygon (now Massive) API key for end-of-day stock prices. Stocks Basic free tier is sufficient. Used by `lib/prices.ts` to populate the portfolio's price column. |
+| `POLYGON_API_KEY` | yes (for portfolio) | Polygon (now Massive) API key for end-of-day stock prices. Stocks Basic free tier is sufficient. Used by `lib/prices.ts` to populate the portfolio's price column and `lib/technicals.ts` for historical OHLC. |
+| `FMP_API_KEY` | yes (for fundamentals) | Financial Modeling Prep API key for fundamental ratios (P/E, ROE, debt/equity, etc.). Free tier (250 calls/day) is sufficient at trial scale with 48h caching. Used by `lib/fundamentals.ts`. |
 
 ## Sentiment Scoring
 
