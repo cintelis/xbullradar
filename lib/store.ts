@@ -1,8 +1,12 @@
 // Persistence layer router for xBullRadar.
 //
 // Picks an implementation based on env:
-//   - UPSTASH_REDIS_REST_URL set → UpstashStore (production: Vercel + Upstash)
-//   - otherwise                  → JsonFileStore (local dev only)
+//   - Any supported Upstash env var pair set → UpstashStore (production)
+//   - otherwise                              → JsonFileStore (local dev)
+//
+// See `getUpstashConfig()` in store-upstash.ts for the list of accepted
+// env var names — supports manual, integration-default, and custom-prefix
+// setups so this works regardless of how Upstash was provisioned.
 //
 // Both implementations satisfy the same `Store` interface, defined in
 // store-types.ts. Route handlers always import `store` from here and
@@ -10,13 +14,13 @@
 
 import path from 'path';
 import { JsonFileStore } from './store-json';
-import { createUpstashStore } from './store-upstash';
+import { createUpstashStore, getUpstashConfig } from './store-upstash';
 import type { Store } from './store-types';
 
 export type { Store } from './store-types';
 
 function createStore(): Store {
-  if (process.env.UPSTASH_REDIS_REST_URL) {
+  if (getUpstashConfig()) {
     return createUpstashStore();
   }
   const storePath =

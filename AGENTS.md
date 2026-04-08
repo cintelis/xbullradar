@@ -28,8 +28,7 @@ All env vars live in `.env` locally (gitignored) and in Vercel project settings 
 | `XAI_API_KEY` | yes | xAI Grok API key |
 | `GROK_MODEL` | no | Default `grok-4.20-reasoning` (deep single-ticker analysis) |
 | `GROK_MODEL_FAST` | no | Default `grok-4-1-fast-reasoning` (batch scoring) |
-| `UPSTASH_REDIS_REST_URL` | prod | Upstash Redis REST URL. When set, switches `lib/store.ts` from JsonFileStore to UpstashStore |
-| `UPSTASH_REDIS_REST_TOKEN` | prod | Upstash Redis REST token (paired with the URL above) |
+| Upstash credentials | prod | One of these pairs must be set to enable UpstashStore: `UPSTASH_REDIS_REST_URL`/`_TOKEN`, or `KV_REST_API_URL`/`_TOKEN`, or `<PREFIX>_KV_REST_API_URL`/`_TOKEN` (Vercel Marketplace integration with custom prefix). See `getUpstashConfig()` in `lib/store-upstash.ts`. |
 | `CRON_SECRET` | prod | Required to call `/api/daily/scan`. Vercel Cron auto-injects `Authorization: Bearer ${CRON_SECRET}`. Local dev can omit it. |
 | `ALERT_WEBHOOK_URL` | no | Slack/Discord webhook for sentiment crossing alerts |
 | `BULLISH_THRESHOLD` | no | Default `0.5` |

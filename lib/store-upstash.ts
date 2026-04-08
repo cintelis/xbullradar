@@ -129,14 +129,46 @@ function parseObject<T>(raw: unknown): T | null {
   return null;
 }
 
+/**
+ * Upstash credentials can land in env under several different names depending
+ * on how the database was provisioned:
+ *
+ *   - Manual setup or `vercel env add`:
+ *       UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
+ *
+ *   - Vercel Marketplace → Upstash integration with default prefix `KV`:
+ *       KV_REST_API_URL / KV_REST_API_TOKEN
+ *
+ *   - Same integration with a custom prefix (e.g. UPSTASH_REDIS_REST):
+ *       <PREFIX>_KV_REST_API_URL / <PREFIX>_KV_REST_API_TOKEN
+ *
+ * We probe all of them in priority order so the same code works regardless
+ * of how the user set up their database.
+ */
+export function getUpstashConfig(): { url: string; token: string } | null {
+  const env = process.env;
+  const candidates: Array<[string | undefined, string | undefined]> = [
+    [env.UPSTASH_REDIS_REST_URL, env.UPSTASH_REDIS_REST_TOKEN],
+    [env.KV_REST_API_URL, env.KV_REST_API_TOKEN],
+    [
+      env.UPSTASH_REDIS_REST_KV_REST_API_URL,
+      env.UPSTASH_REDIS_REST_KV_REST_API_TOKEN,
+    ],
+  ];
+  for (const [url, token] of candidates) {
+    if (url && token) return { url, token };
+  }
+  return null;
+}
+
 export function createUpstashStore(): UpstashStore {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) {
+  const config = getUpstashConfig();
+  if (!config) {
     throw new Error(
-      'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be set to use UpstashStore',
+      'No Upstash credentials found in env. Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN, ' +
+        'or KV_REST_API_URL + KV_REST_API_TOKEN, or use the Vercel Marketplace integration.',
     );
   }
-  const redis = new Redis({ url, token });
+  const redis = new Redis({ url: config.url, token: config.token });
   return new UpstashStore(redis);
 }
