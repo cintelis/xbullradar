@@ -5,7 +5,7 @@
 //   <CombinedBadge>    — the headline column. Visually emphasized: bigger,
 //                        bordered, with optional MIXED state for divergence.
 
-import { TrendingUp, TrendingDown, Minus, AlertTriangle } from 'lucide-react';
+import { TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
 
 export type Signal = 'BUY' | 'SELL' | 'NEUTRAL';
 export type CombinedSignal = 'STRONG_BUY' | 'BUY' | 'NEUTRAL' | 'SELL' | 'STRONG_SELL' | 'MIXED';
@@ -32,21 +32,22 @@ export function SignalBadge({ signal, title, unavailable = false }: SignalBadgeP
 
   const config = {
     BUY: {
-      Icon: TrendingUp,
+      Icon: TrendingUp as typeof TrendingUp | null,
       bg: 'bg-green-500/15',
       border: 'border-green-500/30',
       text: 'text-green-400',
       label: 'BUY',
     },
     SELL: {
-      Icon: TrendingDown,
+      Icon: TrendingDown as typeof TrendingUp | null,
       bg: 'bg-red-500/15',
       border: 'border-red-500/30',
       text: 'text-red-400',
       label: 'SELL',
     },
     NEUTRAL: {
-      Icon: Minus,
+      // No icon — the word alone is clear, the minus sign was redundant.
+      Icon: null as typeof TrendingUp | null,
       bg: 'bg-zinc-500/10',
       border: 'border-zinc-700/50',
       text: 'text-zinc-500',
@@ -61,7 +62,7 @@ export function SignalBadge({ signal, title, unavailable = false }: SignalBadgeP
       title={title ?? label}
       className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${bg} ${border} ${text}`}
     >
-      <Icon className="h-2.5 w-2.5" />
+      {Icon && <Icon className="h-2.5 w-2.5" />}
       {label}
     </span>
   );
@@ -75,9 +76,11 @@ interface CombinedBadgeProps {
   unavailable?: boolean;
 }
 
+type IconComponent = typeof TrendingUp;
+
 const COMBINED_CONFIG: Record<
   CombinedSignal,
-  { Icon: typeof TrendingUp; bg: string; border: string; text: string; label: string }
+  { Icon: IconComponent | null; bg: string; border: string; text: string; label: string }
 > = {
   STRONG_BUY: {
     Icon: TrendingUp,
@@ -94,7 +97,8 @@ const COMBINED_CONFIG: Record<
     label: 'BUY',
   },
   NEUTRAL: {
-    Icon: Minus,
+    // No icon — the word alone is clear, the minus sign was redundant.
+    Icon: null,
     bg: 'bg-zinc-500/10',
     border: 'border-zinc-700/60',
     text: 'text-zinc-400',
@@ -141,7 +145,7 @@ export function CombinedBadge({ signal, title, unavailable = false }: CombinedBa
       title={title ?? label}
       className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-bold uppercase tracking-wide ${bg} ${border} ${text}`}
     >
-      <Icon className="h-3 w-3" />
+      {Icon && <Icon className="h-3 w-3" />}
       {label}
     </span>
   );

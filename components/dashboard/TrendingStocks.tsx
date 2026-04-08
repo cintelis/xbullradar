@@ -313,27 +313,39 @@ export default function TrendingStocks() {
         </p>
       ) : (
         <>
-          {/* Desktop table */}
-          <table className="hidden w-full text-sm md:table">
+          {/* Desktop table — table-fixed with explicit widths for the badge
+              columns. Reasoning column has no <col> width set so it absorbs
+              the leftover horizontal space and respects line-clamp-1 instead
+              of expanding to fit the longest reasoning text. */}
+          <table className="hidden w-full table-fixed text-sm md:table">
+            <colgroup>
+              <col className="w-20" /> {/* Ticker */}
+              <col />                  {/* Reasoning — flexible */}
+              <col className="w-24" /> {/* Sent */}
+              <col className="w-24" /> {/* Tech */}
+              <col className="w-24" /> {/* Fund */}
+              <col className="w-32" /> {/* Combined */}
+              <col className="w-10" /> {/* × */}
+            </colgroup>
             <thead className="text-xs text-zinc-500">
               <tr>
-                <th className="pb-2 text-left">Ticker</th>
-                <th className="pb-2 text-left">Reasoning</th>
-                <th className="pb-2 text-right">Sent</th>
-                <th className="pb-2 text-right">Tech</th>
-                <th className="pb-2 text-right">Fund</th>
-                <th className="pb-2 border-l border-zinc-800/60 pl-3 text-right">Combined</th>
+                <th className="pb-2 pr-2 text-left">Ticker</th>
+                <th className="pb-2 px-2 text-left">Reasoning</th>
+                <th className="pb-2 px-2 text-right">Sent</th>
+                <th className="pb-2 px-2 text-right">Tech</th>
+                <th className="pb-2 px-2 text-right">Fund</th>
+                <th className="pb-2 px-2 text-right">Combined</th>
                 <th className="pb-2"></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.sentiment.ticker} className="group border-t border-zinc-800/50">
-                  <td className="py-2 font-medium">{r.sentiment.ticker}</td>
-                  <td className="py-2 text-zinc-400">
+                  <td className="py-2 pr-2 font-medium">{r.sentiment.ticker}</td>
+                  <td className="py-2 px-2 text-zinc-400">
                     <span className="line-clamp-1">{r.sentiment.reasoning || '—'}</span>
                   </td>
-                  <td className="py-2 text-right">
+                  <td className="py-2 px-2 text-right">
                     <SignalBadge
                       signal={r.sentiment.score !== 0 ? sentimentToSignal(r.sentiment.score) : null}
                       title={
@@ -343,7 +355,7 @@ export default function TrendingStocks() {
                       }
                     />
                   </td>
-                  <td className="py-2 text-right">
+                  <td className="py-2 px-2 text-right">
                     <SignalBadge
                       signal={r.technicalSignal}
                       title={
@@ -353,7 +365,7 @@ export default function TrendingStocks() {
                       }
                     />
                   </td>
-                  <td className="py-2 text-right">
+                  <td className="py-2 px-2 text-right">
                     <SignalBadge
                       signal={r.fundamentalSignal}
                       title={
@@ -363,10 +375,10 @@ export default function TrendingStocks() {
                       }
                     />
                   </td>
-                  <td className="border-l border-zinc-800/60 bg-zinc-900/20 py-2 pl-3 text-right">
+                  <td className="py-2 px-2 text-right">
                     <CombinedBadge signal={r.combined} />
                   </td>
-                  <td className="py-2 pl-2 text-right">
+                  <td className="py-2 text-right">
                     <button
                       type="button"
                       onClick={() => removeTicker(r.sentiment.ticker)}

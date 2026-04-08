@@ -336,19 +336,33 @@ export default function PortfolioView() {
         </p>
       ) : (
         <>
-          {/* Desktop table */}
-          <table className="hidden w-full text-sm md:table">
+          {/* Desktop table — table-fixed + explicit widths so columns stay
+              compact instead of spreading to fill the full-width card. mx-auto
+              centers the table within its container. */}
+          <table className="mx-auto hidden table-fixed text-sm md:table">
+            <colgroup>
+              <col className="w-20" /> {/* Ticker */}
+              <col className="w-20" /> {/* Shares */}
+              <col className="w-24" /> {/* Close */}
+              <col className="w-20" /> {/* Day % */}
+              <col className="w-28" /> {/* Value */}
+              <col className="w-24" /> {/* Sent */}
+              <col className="w-24" /> {/* Tech */}
+              <col className="w-24" /> {/* Fund */}
+              <col className="w-32" /> {/* Combined */}
+              <col className="w-10" /> {/* × */}
+            </colgroup>
             <thead className="text-xs text-zinc-500">
               <tr>
-                <th className="pb-2 text-left">Ticker</th>
-                <th className="pb-2 text-right">Shares</th>
-                <th className="pb-2 text-right">Close</th>
-                <th className="pb-2 text-right">Day %</th>
-                <th className="pb-2 text-right">Value</th>
-                <th className="pb-2 text-right">Sent</th>
-                <th className="pb-2 text-right">Tech</th>
-                <th className="pb-2 text-right">Fund</th>
-                <th className="pb-2 border-l border-zinc-800/60 pl-3 text-right">Combined</th>
+                <th className="pb-2 pr-2 text-left">Ticker</th>
+                <th className="pb-2 px-2 text-right">Shares</th>
+                <th className="pb-2 px-2 text-right">Close</th>
+                <th className="pb-2 px-2 text-right">Day %</th>
+                <th className="pb-2 px-2 text-right">Value</th>
+                <th className="pb-2 px-2 text-right">Sent</th>
+                <th className="pb-2 px-2 text-right">Tech</th>
+                <th className="pb-2 px-2 text-right">Fund</th>
+                <th className="pb-2 px-2 text-right">Combined</th>
                 <th className="pb-2"></th>
               </tr>
             </thead>
@@ -358,13 +372,13 @@ export default function PortfolioView() {
                 const sentSig = h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null;
                 return (
                   <tr key={h.ticker} className="group border-t border-zinc-800/50">
-                    <td className="py-2 font-medium">{h.ticker}</td>
-                    <td className="py-2 text-right font-mono text-zinc-300">{h.shares}</td>
-                    <td className="py-2 text-right font-mono text-zinc-300">
+                    <td className="py-2 pr-2 font-medium">{h.ticker}</td>
+                    <td className="py-2 px-2 text-right font-mono text-zinc-300">{h.shares}</td>
+                    <td className="py-2 px-2 text-right font-mono text-zinc-300">
                       {h.lastClose != null ? `$${h.lastClose.toFixed(2)}` : '—'}
                     </td>
                     <td
-                      className={`py-2 text-right font-mono ${
+                      className={`py-2 px-2 text-right font-mono ${
                         h.dayChangePercent == null
                           ? 'text-zinc-500'
                           : h.dayChangePercent > 0
@@ -378,10 +392,10 @@ export default function PortfolioView() {
                         ? `${h.dayChangePercent > 0 ? '+' : ''}${h.dayChangePercent.toFixed(2)}%`
                         : '—'}
                     </td>
-                    <td className="py-2 text-right font-mono text-zinc-200">
+                    <td className="py-2 px-2 text-right font-mono text-zinc-200">
                       {h.value != null ? formatCurrency(h.value) : '—'}
                     </td>
-                    <td className="py-2 text-right">
+                    <td className="py-2 px-2 text-right">
                       <SignalBadge
                         signal={sentSig}
                         title={
@@ -391,7 +405,7 @@ export default function PortfolioView() {
                         }
                       />
                     </td>
-                    <td className="py-2 text-right">
+                    <td className="py-2 px-2 text-right">
                       <SignalBadge
                         signal={r.technicalSignal}
                         title={
@@ -401,7 +415,7 @@ export default function PortfolioView() {
                         }
                       />
                     </td>
-                    <td className="py-2 text-right">
+                    <td className="py-2 px-2 text-right">
                       <SignalBadge
                         signal={r.fundamentalSignal}
                         title={
@@ -411,10 +425,10 @@ export default function PortfolioView() {
                         }
                       />
                     </td>
-                    <td className="border-l border-zinc-800/60 bg-zinc-900/20 py-2 pl-3 text-right">
+                    <td className="py-2 px-2 text-right">
                       <CombinedBadge signal={r.combined} />
                     </td>
-                    <td className="py-2 pl-2 text-right">
+                    <td className="py-2 text-right">
                       <button
                         type="button"
                         onClick={() => removeHolding(h.ticker)}

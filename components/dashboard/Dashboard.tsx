@@ -30,14 +30,15 @@ export default function Dashboard({ userEmail }: DashboardProps) {
         {/* Main content */}
         <main className="flex-1 overflow-auto p-4 lg:p-6">
           {isDesktop ? (
-            // Desktop: SentimentRadar + TrendingStocks side-by-side, then
-            // PortfolioView full-width below.
-            <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-2">
+            // Desktop: stack all three full-width so the new signal columns
+            // (Sent / Tech / Fund / Combined) have horizontal room to breathe.
+            // Previously TrendingStocks was 2-col side-by-side with
+            // SentimentRadar, which squeezed the table to ~520px and forced
+            // ugly wrapping after the technicals/fundamentals columns landed.
+            <div className="mx-auto max-w-6xl space-y-6">
               <SentimentRadar />
               <TrendingStocks />
-              <div className="lg:col-span-2">
-                <PortfolioView />
-              </div>
+              <PortfolioView />
             </div>
           ) : (
             // Mobile: tab-switched
