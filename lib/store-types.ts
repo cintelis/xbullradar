@@ -1,33 +1,51 @@
 // Shared types and defaults for all Store implementations.
-// Kept in its own file so the JSON impl and the Upstash impl don't need
-// to import each other.
+//
+// As of Commit 2 (per-user data refactor), every method on the Store
+// interface takes a `userId`. Each user has their own watchlist, holdings,
+// and last-sentiment map. New users are seeded with DEFAULT_USER_DATA on
+// first access.
 
 import type { PortfolioHolding, StockSentiment } from '@/types';
 
 export interface Store {
-  getWatchlist(): Promise<string[]>;
-  setWatchlist(tickers: string[]): Promise<void>;
+  getWatchlist(userId: string): Promise<string[]>;
+  setWatchlist(userId: string, tickers: string[]): Promise<void>;
 
-  getHoldings(): Promise<PortfolioHolding[]>;
-  setHoldings(holdings: PortfolioHolding[]): Promise<void>;
+  getHoldings(userId: string): Promise<PortfolioHolding[]>;
+  setHoldings(userId: string, holdings: PortfolioHolding[]): Promise<void>;
 
-  getLastSentiment(ticker: string): Promise<StockSentiment | null>;
-  setLastSentiment(sentiment: StockSentiment): Promise<void>;
-  getAllLastSentiments(): Promise<Record<string, StockSentiment>>;
+  getLastSentiment(userId: string, ticker: string): Promise<StockSentiment | null>;
+  setLastSentiment(userId: string, sentiment: StockSentiment): Promise<void>;
+  getAllLastSentiments(userId: string): Promise<Record<string, StockSentiment>>;
+
+  /**
+   * Enumerate all userIds that have ever stored data. Used by the daily
+   * scan cron to iterate over every user's watchlist. Implementations
+   * SHOULD NOT include the system user in this list — that's a transient
+   * placeholder until Commit 4 fully wires real users.
+   */
+  listUserIds(): Promise<string[]>;
 }
 
-export interface StoreData {
+/**
+ * Per-user data shape. Used as both the JsonFileStore on-disk schema and
+ * as a logical grouping inside UpstashStore (which splits each field into
+ * its own Redis key).
+ */
+export interface UserData {
   watchlist: string[];
   holdings: PortfolioHolding[];
   lastSentiment: Record<string, StockSentiment>;
 }
 
-export const DEFAULT_DATA: StoreData = {
+/**
+ * Default seed for any new user. Pre-populates the watchlist so the
+ * dashboard isn't empty on first sign-in. Holdings start empty — the
+ * PortfolioOverview component is hidden until a real holdings input UI
+ * exists (Phase 2).
+ */
+export const DEFAULT_USER_DATA: UserData = {
   watchlist: ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'META', 'GOOG'],
-  holdings: [
-    { ticker: 'NVDA', shares: 24, value: 14820, changePercent: 2.1, sentimentScore: 0 },
-    { ticker: 'TSLA', shares: 10, value: 2410, changePercent: -0.8, sentimentScore: 0 },
-    { ticker: 'AAPL', shares: 30, value: 6720, changePercent: 0.4, sentimentScore: 0 },
-  ],
+  holdings: [],
   lastSentiment: {},
 };

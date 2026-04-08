@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { analyzeTickersBatch } from '@/lib/sentiment';
-import { store } from '@/lib/store';
+import { store, SYSTEM_USER_ID } from '@/lib/store';
 import { detectAlert, sendAlert } from '@/lib/alerts';
 
 export const runtime = 'nodejs';
@@ -28,7 +28,11 @@ function isAuthorized(request: NextRequest): boolean {
 }
 
 async function runScan() {
-  const watchlist = await store.getWatchlist();
+  // TODO Commit 4: iterate over store.listUserIds() and scan each user's
+  // watchlist. For now scans only the system user (the global pre-auth
+  // dataset) so the cron keeps working through Commit 2/3.
+  const userId = SYSTEM_USER_ID;
+  const watchlist = await store.getWatchlist(userId);
   if (watchlist.length === 0) {
     return { success: true, message: 'Watchlist is empty', results: [], alerts: [] };
   }
@@ -37,13 +41,13 @@ async function runScan() {
 
   const alerts = [];
   for (const sentiment of results) {
-    const previous = await store.getLastSentiment(sentiment.ticker);
+    const previous = await store.getLastSentiment(userId, sentiment.ticker);
     const alert = detectAlert({ current: sentiment, previous });
     if (alert) {
       alerts.push(alert);
       await sendAlert(alert);
     }
-    await store.setLastSentiment(sentiment);
+    await store.setLastSentiment(userId, sentiment);
   }
 
   return {

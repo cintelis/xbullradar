@@ -5,87 +5,103 @@
 // host because it talks to Upstash over HTTPS, not TCP — no connection
 // pooling required.
 //
-// Data layout:
-//   xbr:watchlist            string  (JSON array of tickers)
-//   xbr:holdings             string  (JSON array of holdings)
-//   xbr:sentiment:last       hash    (field=ticker, value=JSON StockSentiment)
+// As of Commit 2 (per-user refactor), each user has their own keys:
+//   xbr:user:{userId}:watchlist           string  (JSON array of tickers)
+//   xbr:user:{userId}:holdings            string  (JSON array of holdings)
+//   xbr:user:{userId}:sentiment:last      hash    (field=ticker, value=JSON)
+//   xbr:users                             set     (set of all userIds for cron)
 //
 // Hash for last-sentiment lets the daily scan write 7 ticker scores as 7
-// HSET field updates instead of rewriting one big blob.
+// HSET field updates per user instead of rewriting one big blob.
 
 import { Redis } from '@upstash/redis';
 import type { PortfolioHolding, StockSentiment } from '@/types';
 import type { Store } from './store-types';
-import { DEFAULT_DATA } from './store-types';
+import { DEFAULT_USER_DATA } from './store-types';
 
-const KEY_WATCHLIST = 'xbr:watchlist';
-const KEY_HOLDINGS = 'xbr:holdings';
-const KEY_SENTIMENT_HASH = 'xbr:sentiment:last';
+const KEY_USERS_SET = 'xbr:users';
+const KEY_WATCHLIST = (userId: string) => `xbr:user:${userId}:watchlist`;
+const KEY_HOLDINGS = (userId: string) => `xbr:user:${userId}:holdings`;
+const KEY_SENTIMENT_HASH = (userId: string) => `xbr:user:${userId}:sentiment:last`;
 
 export class UpstashStore implements Store {
   private readonly redis: Redis;
-  private seedPromise: Promise<void> | null = null;
+  private readonly seedPromises = new Map<string, Promise<void>>();
 
   constructor(redis: Redis) {
     this.redis = redis;
   }
 
   /**
-   * One-time seed of defaults if the watchlist key is missing. Idempotent
-   * and concurrency-safe via the cached promise — multiple parallel reads
-   * during a cold start all await the same seed operation.
+   * One-time seed of defaults if a user's watchlist key is missing. Cached
+   * per user so parallel reads during a cold start await the same operation.
+   * Also adds the userId to the global users set so the cron can iterate.
    */
-  private async ensureSeeded(): Promise<void> {
-    if (this.seedPromise) return this.seedPromise;
-    this.seedPromise = (async () => {
-      const exists = await this.redis.exists(KEY_WATCHLIST);
-      if (exists) return;
-      await Promise.all([
-        this.redis.set(KEY_WATCHLIST, JSON.stringify(DEFAULT_DATA.watchlist)),
-        this.redis.set(KEY_HOLDINGS, JSON.stringify(DEFAULT_DATA.holdings)),
-      ]);
+  private async ensureUserSeeded(userId: string): Promise<void> {
+    const existing = this.seedPromises.get(userId);
+    if (existing) return existing;
+
+    const promise = (async () => {
+      const exists = await this.redis.exists(KEY_WATCHLIST(userId));
+      if (!exists) {
+        await Promise.all([
+          this.redis.set(KEY_WATCHLIST(userId), JSON.stringify(DEFAULT_USER_DATA.watchlist)),
+          this.redis.set(KEY_HOLDINGS(userId), JSON.stringify(DEFAULT_USER_DATA.holdings)),
+        ]);
+      }
+      // Always SADD — it's idempotent and cheap. Ensures the cron sees this user
+      // even if their watchlist key existed but they weren't yet in the set
+      // (shouldn't happen, but defensive against partial state).
+      await this.redis.sadd(KEY_USERS_SET, userId);
     })();
-    return this.seedPromise;
+
+    this.seedPromises.set(userId, promise);
+    return promise;
   }
 
-  async getWatchlist(): Promise<string[]> {
-    await this.ensureSeeded();
-    const raw = await this.redis.get<string | string[]>(KEY_WATCHLIST);
-    return parseArray<string>(raw, DEFAULT_DATA.watchlist);
+  async getWatchlist(userId: string): Promise<string[]> {
+    await this.ensureUserSeeded(userId);
+    const raw = await this.redis.get<string | string[]>(KEY_WATCHLIST(userId));
+    return parseArray<string>(raw, DEFAULT_USER_DATA.watchlist);
   }
 
-  async setWatchlist(tickers: string[]): Promise<void> {
+  async setWatchlist(userId: string, tickers: string[]): Promise<void> {
+    await this.ensureUserSeeded(userId);
     const upper = tickers.map((t) => t.toUpperCase());
-    await this.redis.set(KEY_WATCHLIST, JSON.stringify(upper));
+    await this.redis.set(KEY_WATCHLIST(userId), JSON.stringify(upper));
   }
 
-  async getHoldings(): Promise<PortfolioHolding[]> {
-    await this.ensureSeeded();
-    const raw = await this.redis.get<string | PortfolioHolding[]>(KEY_HOLDINGS);
-    return parseArray<PortfolioHolding>(raw, DEFAULT_DATA.holdings);
+  async getHoldings(userId: string): Promise<PortfolioHolding[]> {
+    await this.ensureUserSeeded(userId);
+    const raw = await this.redis.get<string | PortfolioHolding[]>(KEY_HOLDINGS(userId));
+    return parseArray<PortfolioHolding>(raw, DEFAULT_USER_DATA.holdings);
   }
 
-  async setHoldings(holdings: PortfolioHolding[]): Promise<void> {
-    await this.redis.set(KEY_HOLDINGS, JSON.stringify(holdings));
+  async setHoldings(userId: string, holdings: PortfolioHolding[]): Promise<void> {
+    await this.ensureUserSeeded(userId);
+    await this.redis.set(KEY_HOLDINGS(userId), JSON.stringify(holdings));
   }
 
-  async getLastSentiment(ticker: string): Promise<StockSentiment | null> {
+  async getLastSentiment(userId: string, ticker: string): Promise<StockSentiment | null> {
+    await this.ensureUserSeeded(userId);
     const raw = await this.redis.hget<string | StockSentiment>(
-      KEY_SENTIMENT_HASH,
+      KEY_SENTIMENT_HASH(userId),
       ticker.toUpperCase(),
     );
     return parseObject<StockSentiment>(raw);
   }
 
-  async setLastSentiment(sentiment: StockSentiment): Promise<void> {
-    await this.redis.hset(KEY_SENTIMENT_HASH, {
+  async setLastSentiment(userId: string, sentiment: StockSentiment): Promise<void> {
+    await this.ensureUserSeeded(userId);
+    await this.redis.hset(KEY_SENTIMENT_HASH(userId), {
       [sentiment.ticker.toUpperCase()]: JSON.stringify(sentiment),
     });
   }
 
-  async getAllLastSentiments(): Promise<Record<string, StockSentiment>> {
+  async getAllLastSentiments(userId: string): Promise<Record<string, StockSentiment>> {
+    await this.ensureUserSeeded(userId);
     const raw = await this.redis.hgetall<Record<string, string | StockSentiment>>(
-      KEY_SENTIMENT_HASH,
+      KEY_SENTIMENT_HASH(userId),
     );
     if (!raw) return {};
     const out: Record<string, StockSentiment> = {};
@@ -94,6 +110,12 @@ export class UpstashStore implements Store {
       if (parsed) out[ticker] = parsed;
     }
     return out;
+  }
+
+  async listUserIds(): Promise<string[]> {
+    const ids = await this.redis.smembers(KEY_USERS_SET);
+    if (!Array.isArray(ids)) return [];
+    return ids.filter((id): id is string => typeof id === 'string' && id !== 'system');
   }
 }
 
