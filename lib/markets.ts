@@ -26,26 +26,47 @@ import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
-const CACHE_KEY = 'xbr:markets';
+// Bumped to v2 when the symbol list expanded to include major global
+// indexes alongside commodities. Bumping the key invalidates the old
+// cache instantly instead of waiting for the 6h TTL to expire.
+const CACHE_KEY = 'xbr:markets:v2';
 const CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
 /**
- * The 10 commodities (and index futures) we ticker-tape across the top of
- * the dashboard. Picked for diversity (metals, energy, ag, indices, bonds)
- * and recognizability for casual finance users.
+ * Instruments we ticker-tape across the top of the dashboard. Mix of
+ * major global stock indexes (S&P 500, Nasdaq, Dow, FTSE, Nikkei, Hang
+ * Seng), key commodities (metals, energy), and Treasury futures.
  *
- * FMP categorizes index futures (ESUSD, NQUSD) and Treasury futures
- * (ZNUSD, ZBUSD) under commodities, so we lean into that.
+ * Order: most-watched US indexes first, then global indexes, then
+ * commodities, then bonds. Reads as a "global market summary" left-to-right.
+ *
+ * Two notable indexes excluded due to FMP free-tier coverage gaps:
+ *   - ^GDAXI (DAX 40 / Germany) — premium endpoint
+ *   - ^AXJO (ASX 200 / Australia) — premium endpoint
+ * Re-add when/if upgrading to FMP Stocks Starter ($14/mo).
+ *
+ * NOTE: ^N225 returns "Nikkei 225" which is the index, not the JPX
+ * exchange. The exchange hours pill (right side of MarketStrip) covers
+ * the "is Tokyo trading?" question separately via JPX.
  */
-const COMMODITY_SYMBOLS: Array<{ symbol: string; label: string }> = [
+const INSTRUMENT_SYMBOLS: Array<{ symbol: string; label: string }> = [
+  // US indexes — most-watched
+  { symbol: '^GSPC', label: 'S&P 500' },
+  { symbol: '^IXIC', label: 'NASDAQ' },
+  { symbol: '^DJI', label: 'DOW' },
+  // Global indexes
+  { symbol: '^FTSE', label: 'FTSE 100' },
+  { symbol: '^N225', label: 'NIKKEI' },
+  { symbol: '^HSI', label: 'HANG SENG' },
+  // Metals
   { symbol: 'GCUSD', label: 'GOLD' },
   { symbol: 'SIUSD', label: 'SILVER' },
+  { symbol: 'HGUSD', label: 'COPPER' },
+  // Energy
   { symbol: 'CLUSD', label: 'WTI OIL' },
   { symbol: 'BZUSD', label: 'BRENT' },
   { symbol: 'NGUSD', label: 'NAT GAS' },
-  { symbol: 'HGUSD', label: 'COPPER' },
-  { symbol: 'ESUSD', label: 'S&P 500' },
-  { symbol: 'NQUSD', label: 'NASDAQ' },
+  // Bonds
   { symbol: 'ZNUSD', label: '10Y NOTE' },
   { symbol: 'ZBUSD', label: '30Y BOND' },
 ];
@@ -137,18 +158,19 @@ async function fetchCommodityQuote(
 }
 
 /**
- * Fetch all commodities sequentially. ~200ms per quote × 10 = ~2s total
- * cold-cache cost. Hot cache is instant. Failures don't break the whole
- * batch — missing symbols just get omitted from the result.
+ * Fetch all instrument quotes sequentially. ~200ms per quote × 14 = ~3s
+ * total cold-cache cost. Hot cache is instant. Failures don't break the
+ * whole batch — missing symbols just get omitted from the result so a
+ * single broken ticker doesn't take down the whole strip.
  */
 async function fetchAllCommodities(): Promise<CommodityQuote[]> {
   const out: CommodityQuote[] = [];
-  for (const { symbol, label } of COMMODITY_SYMBOLS) {
+  for (const { symbol, label } of INSTRUMENT_SYMBOLS) {
     try {
       const quote = await fetchCommodityQuote(symbol, label);
       if (quote) out.push(quote);
     } catch (err) {
-      console.warn(`[markets] commodity quote failed for ${symbol}:`, err);
+      console.warn(`[markets] quote failed for ${symbol}:`, err);
     }
   }
   return out;
