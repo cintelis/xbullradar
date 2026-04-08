@@ -12,10 +12,10 @@
 // store-types.ts. Route handlers always import `store` from here and
 // don't know which backend is in use.
 //
-// As of Commit 2 (per-user refactor), every Store method takes a userId.
-// Until Commit 4 wires real authenticated users into the route handlers,
-// the existing routes pass SYSTEM_USER_ID as a temporary placeholder so
-// the live deploy keeps working without disruption.
+// Every Store method takes a userId. Route handlers read the authenticated
+// user via getCurrentUser() from lib/auth and pass user.id to the store.
+// The daily scan cron iterates store.listUserIds() to scan every user's
+// watchlist on schedule.
 
 import path from 'path';
 import { JsonFileStore } from './store-json';
@@ -23,16 +23,6 @@ import { createUpstashStore, getUpstashConfig } from './store-upstash';
 import type { Store } from './store-types';
 
 export type { Store } from './store-types';
-
-/**
- * Temporary placeholder user ID used by route handlers that haven't been
- * wired to authenticated sessions yet. Removed entirely in Commit 4 once
- * every route reads `userId` from the session.
- *
- * `listUserIds()` excludes this ID so the daily scan cron doesn't keep
- * scanning a phantom user after real users sign in.
- */
-export const SYSTEM_USER_ID = 'system';
 
 function createStore(): Store {
   if (getUpstashConfig()) {

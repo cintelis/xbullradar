@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { analyzeTickersBatch } from '@/lib/sentiment';
-import { store, SYSTEM_USER_ID } from '@/lib/store';
+import { store } from '@/lib/store';
 import { detectAlert, sendAlert } from '@/lib/alerts';
 
 export const runtime = 'nodejs';
@@ -28,35 +28,71 @@ function isAuthorized(request: NextRequest): boolean {
 }
 
 async function runScan() {
-  // TODO Commit 4: iterate over store.listUserIds() and scan each user's
-  // watchlist. For now scans only the system user (the global pre-auth
-  // dataset) so the cron keeps working through Commit 2/3.
-  const userId = SYSTEM_USER_ID;
-  const watchlist = await store.getWatchlist(userId);
-  if (watchlist.length === 0) {
-    return { success: true, message: 'Watchlist is empty', results: [], alerts: [] };
+  const userIds = await store.listUserIds();
+  if (userIds.length === 0) {
+    return {
+      success: true,
+      message: 'No users to scan',
+      timestamp: new Date().toISOString(),
+      usersScanned: 0,
+      tickersScanned: 0,
+      alertsFired: 0,
+      perUser: [],
+    };
   }
 
-  const results = await analyzeTickersBatch(watchlist);
+  // Sequential, not parallel — N users × 1 batch Grok call each. Parallel
+  // would hammer Grok rate limits and we don't get faster results from the
+  // user's perspective anyway (this is a background cron, not a UI request).
+  // When this becomes a bottleneck (probably ~100+ active users), the right
+  // optimization is to deduplicate tickers across users into a single Grok
+  // call and split the results — see backlog.
+  const perUser: Array<{
+    userId: string;
+    tickerCount: number;
+    alertCount: number;
+  }> = [];
+  let totalTickers = 0;
+  let totalAlerts = 0;
 
-  const alerts = [];
-  for (const sentiment of results) {
-    const previous = await store.getLastSentiment(userId, sentiment.ticker);
-    const alert = detectAlert({ current: sentiment, previous });
-    if (alert) {
-      alerts.push(alert);
-      await sendAlert(alert);
+  for (const userId of userIds) {
+    try {
+      const watchlist = await store.getWatchlist(userId);
+      if (watchlist.length === 0) {
+        perUser.push({ userId, tickerCount: 0, alertCount: 0 });
+        continue;
+      }
+
+      const results = await analyzeTickersBatch(watchlist);
+      let alertCount = 0;
+
+      for (const sentiment of results) {
+        const previous = await store.getLastSentiment(userId, sentiment.ticker);
+        const alert = detectAlert({ current: sentiment, previous });
+        if (alert) {
+          alertCount += 1;
+          totalAlerts += 1;
+          await sendAlert(alert);
+        }
+        await store.setLastSentiment(userId, sentiment);
+      }
+
+      totalTickers += results.length;
+      perUser.push({ userId, tickerCount: results.length, alertCount });
+    } catch (err) {
+      // One user's failure shouldn't stop the whole scan. Log and continue.
+      console.error(`[daily/scan] failed for user ${userId}:`, err);
+      perUser.push({ userId, tickerCount: 0, alertCount: 0 });
     }
-    await store.setLastSentiment(userId, sentiment);
   }
 
   return {
     success: true,
     timestamp: new Date().toISOString(),
-    scanned: results.length,
-    alertsFired: alerts.length,
-    results,
-    alerts,
+    usersScanned: userIds.length,
+    tickersScanned: totalTickers,
+    alertsFired: totalAlerts,
+    perUser,
   };
 }
 

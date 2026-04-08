@@ -1,10 +1,19 @@
 import { NextRequest } from 'next/server';
 import { analyzeTicker } from '@/lib/sentiment';
+import { getCurrentUser } from '@/lib/auth';
 import type { CopilotRequest, CopilotResponse } from '@/types';
 
 export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json(
+      { message: 'Not authenticated' } satisfies CopilotResponse,
+      { status: 401 },
+    );
+  }
+
   let body: CopilotRequest;
   try {
     body = (await request.json()) as CopilotRequest;

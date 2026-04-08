@@ -1,5 +1,6 @@
 import { analyzeTickersBatch } from '@/lib/sentiment';
-import { store, SYSTEM_USER_ID } from '@/lib/store';
+import { store } from '@/lib/store';
+import { getCurrentUser } from '@/lib/auth';
 
 export const runtime = 'nodejs';
 
@@ -11,10 +12,12 @@ export const runtime = 'nodejs';
  *        Used when the user clicks "refresh".
  */
 export async function GET() {
-  // TODO Commit 4: read userId from authenticated session.
-  const userId = SYSTEM_USER_ID;
-  const watchlist = await store.getWatchlist(userId);
-  const lastAll = await store.getAllLastSentiments(userId);
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json({ error: 'Not authenticated' }, { status: 401 });
+  }
+  const watchlist = await store.getWatchlist(user.id);
+  const lastAll = await store.getAllLastSentiments(user.id);
 
   const results = watchlist.map((ticker) => {
     const last = lastAll[ticker];
@@ -31,13 +34,15 @@ export async function GET() {
 }
 
 export async function POST() {
-  // TODO Commit 4: read userId from authenticated session.
-  const userId = SYSTEM_USER_ID;
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json({ error: 'Not authenticated' }, { status: 401 });
+  }
   try {
-    const watchlist = await store.getWatchlist(userId);
+    const watchlist = await store.getWatchlist(user.id);
     const results = await analyzeTickersBatch(watchlist);
     for (const sentiment of results) {
-      await store.setLastSentiment(userId, sentiment);
+      await store.setLastSentiment(user.id, sentiment);
     }
     return Response.json({ results, fresh: true });
   } catch (err) {

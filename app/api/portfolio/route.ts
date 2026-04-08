@@ -1,15 +1,18 @@
 import { NextRequest } from 'next/server';
-import { store, SYSTEM_USER_ID } from '@/lib/store';
+import { store } from '@/lib/store';
+import { getCurrentUser } from '@/lib/auth';
 import type { PortfolioHolding } from '@/types';
 
 export const runtime = 'nodejs';
 
 export async function GET() {
-  // TODO Commit 4: read userId from authenticated session.
-  const userId = SYSTEM_USER_ID;
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json({ error: 'Not authenticated' }, { status: 401 });
+  }
   const [holdings, lastAll] = await Promise.all([
-    store.getHoldings(userId),
-    store.getAllLastSentiments(userId),
+    store.getHoldings(user.id),
+    store.getAllLastSentiments(user.id),
   ]);
 
   // Hydrate each holding with its latest sentiment score from the store.
@@ -22,14 +25,16 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  // TODO Commit 4: read userId from authenticated session.
-  const userId = SYSTEM_USER_ID;
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json({ error: 'Not authenticated' }, { status: 401 });
+  }
   try {
     const body = (await request.json()) as { holdings: PortfolioHolding[] };
     if (!Array.isArray(body?.holdings)) {
       return Response.json({ error: 'holdings array required' }, { status: 400 });
     }
-    await store.setHoldings(userId, body.holdings);
+    await store.setHoldings(user.id, body.holdings);
     return Response.json({ success: true });
   } catch (err) {
     return Response.json({ error: (err as Error).message }, { status: 400 });
