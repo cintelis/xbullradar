@@ -44,7 +44,11 @@ const CLOCK_INTERVAL_MS = 30 * 1000;    // recompute "is open" every 30s
 // Subset of exchanges to surface on the right side of the strip. Picked
 // for global timezone coverage (Asia → Europe → Americas → Pacific) so
 // at almost any hour at least one is showing green.
-const FEATURED_EXCHANGES = ['NYSE', 'LSE', 'FSX', 'HKSE', 'TSE', 'ASX'];
+//
+// Note: FMP uses `JPX` (Japan Exchange Group) for Tokyo, not the more
+// commonly-known `TSE`. List of all FMP exchange codes is on
+// /stable/all-exchange-market-hours — keep additions in sync with that.
+const FEATURED_EXCHANGES = ['NYSE', 'LSE', 'FSX', 'HKSE', 'JPX', 'ASX'];
 
 export default function MarketStrip() {
   const [data, setData] = useState<MarketsApiResponse | null>(null);
