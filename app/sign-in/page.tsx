@@ -12,9 +12,6 @@ interface SignInPageProps {
  * and redirects to the dashboard if already authenticated. Otherwise
  * renders the magic-link form with the brand bull image above it.
  *
- * Background is #142838 — a slightly lighter version of #0F1C27 so the
- * dark bull stands out against the page bg.
- *
  * The bull image (public/assets/bullradar.png) has a transparent
  * background, so it sits on the page naturally without needing a blend
  * mode. Referenced by URL string (not static import) because files in
@@ -32,7 +29,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const initialError = params.error ?? null;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#142838] p-6">
+    <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-6">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <Image
@@ -55,7 +52,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
         </div>
 
         <p className="text-center text-xs text-zinc-500">
-          Limited trial · Invite only
+          AI Market Radar · Tokenized RWAs
         </p>
       </div>
     </div>
