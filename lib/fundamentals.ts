@@ -10,18 +10,24 @@
 // API more than necessary.
 //
 // API docs: https://site.financialmodelingprep.com/developer/docs
-// Endpoints used:
-//   GET /api/v3/key-metrics-ttm/{ticker}      → returns TTM key metrics
-//   GET /api/v3/ratios-ttm/{ticker}            → returns TTM financial ratios
+// Endpoints used (FMP "Stable" API — replaces deprecated /api/v3/* paths
+// retired in August 2025):
+//   GET /stable/key-metrics-ttm?symbol={ticker}  → TTM key metrics
+//   GET /stable/ratios-ttm?symbol={ticker}        → TTM financial ratios
 //
 // Rate limit: 250 calls/day on free tier. 2 calls per ticker per refresh.
 // At 50 holdings × 2 calls / 48h cache = ~50 calls/day average. Well under.
+//
+// Coverage note: FMP free tier covers large caps and most S&P 500 tickers
+// but excludes many small-cap and recent-IPO names. The fetch returns null
+// for unsupported tickers (FMP responds with a "Premium Query Parameter"
+// error in the body for those) — the UI shows "—" in the Fund column.
 
 import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 import type { Signal } from './technicals';
 
-const FMP_API_BASE = 'https://financialmodelingprep.com/api/v3';
+const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
 const CACHE_TTL_SECONDS = 48 * 60 * 60; // 48 hours
 const FUND_KEY = (ticker: string) => `xbr:fundamentals:${ticker}`;
 
@@ -63,27 +69,51 @@ function getApiKey(): string {
   return key;
 }
 
+/**
+ * FMP Stable API key-metrics-ttm response shape (only the fields we use).
+ * Note: P/E, P/B, P/S ratios moved OUT of this endpoint into ratios-ttm
+ * with the v3 → stable migration. This endpoint now contains structural
+ * metrics like ROE, current ratio, and FCF yield.
+ */
 interface FMPKeyMetricsTTM {
   symbol?: string;
-  peRatioTTM?: number | null;
-  pbRatioTTM?: number | null;
-  priceToSalesRatioTTM?: number | null;
-  roeTTM?: number | null;
-  netIncomePerShareTTM?: number | null;
-  freeCashFlowPerShareTTM?: number | null;
+  returnOnEquityTTM?: number | null;
   currentRatioTTM?: number | null;
-  debtToEquityTTM?: number | null;
+  freeCashFlowYieldTTM?: number | null;
+  freeCashFlowToEquityTTM?: number | null;
+  marketCap?: number | null;
 }
 
+/**
+ * FMP Stable API ratios-ttm response shape (only the fields we use).
+ * P/E, P/B, P/S, debt-to-equity, and net margin all live here now.
+ */
 interface FMPRatiosTTM {
   symbol?: string;
+  priceToEarningsRatioTTM?: number | null;
+  priceToBookRatioTTM?: number | null;
+  priceToSalesRatioTTM?: number | null;
   netProfitMarginTTM?: number | null;
-  // FMP also returns dozens of other fields; we only need the ones above for MVP.
+  debtToEquityRatioTTM?: number | null;
+  netIncomePerShareTTM?: number | null;
+}
+
+/**
+ * Detect FMP error responses that come back as 200 OK with an error body.
+ * Both "Legacy Endpoint" and "Premium Query Parameter" errors use this
+ * pattern instead of HTTP status codes. Returns true if the body looks
+ * like an FMP error response.
+ */
+function isFMPErrorBody(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  return 'Error Message' in body || 'error' in body;
 }
 
 /**
  * Fetch raw fundamentals from FMP for a single ticker. Returns null if
- * the ticker is unknown to FMP. Throws on real API errors.
+ * the ticker is unknown to FMP OR not covered by the current subscription
+ * tier (small caps, recent IPOs, ETFs). Throws only on real API errors
+ * like network failure or auth problems.
  */
 async function fetchFundamentalsRaw(ticker: string): Promise<{
   metrics: FMPKeyMetricsTTM;
@@ -93,11 +123,11 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
   const upper = ticker.toUpperCase();
 
   const [metricsRes, ratiosRes] = await Promise.all([
-    fetch(`${FMP_API_BASE}/key-metrics-ttm/${encodeURIComponent(upper)}?apikey=${apiKey}`, {
+    fetch(`${FMP_API_BASE}/key-metrics-ttm?symbol=${encodeURIComponent(upper)}&apikey=${apiKey}`, {
       headers: { Accept: 'application/json' },
       cache: 'no-store',
     }),
-    fetch(`${FMP_API_BASE}/ratios-ttm/${encodeURIComponent(upper)}?apikey=${apiKey}`, {
+    fetch(`${FMP_API_BASE}/ratios-ttm?symbol=${encodeURIComponent(upper)}&apikey=${apiKey}`, {
       headers: { Accept: 'application/json' },
       cache: 'no-store',
     }),
@@ -111,12 +141,24 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
     );
   }
 
-  const metricsJson = (await metricsRes.json()) as FMPKeyMetricsTTM[] | FMPKeyMetricsTTM;
-  const ratiosJson = (await ratiosRes.json()) as FMPRatiosTTM[] | FMPRatiosTTM;
+  const metricsJson = (await metricsRes.json()) as unknown;
+  const ratiosJson = (await ratiosRes.json()) as unknown;
+
+  // FMP returns errors as 200 OK with `{ "Error Message": "..." }` in the body.
+  // Treat as "no data available" — the UI shows "—" in the Fund column rather
+  // than crashing the whole portfolio request.
+  if (isFMPErrorBody(metricsJson) || isFMPErrorBody(ratiosJson)) {
+    const errMsg =
+      (metricsJson as { ['Error Message']?: string })?.['Error Message'] ??
+      (ratiosJson as { ['Error Message']?: string })?.['Error Message'] ??
+      'unknown FMP error';
+    console.warn(`[fundamentals] ${upper} not available: ${errMsg.slice(0, 120)}`);
+    return null;
+  }
 
   // FMP wraps single-ticker responses in an array
-  const metrics = Array.isArray(metricsJson) ? metricsJson[0] : metricsJson;
-  const ratios = Array.isArray(ratiosJson) ? ratiosJson[0] : ratiosJson;
+  const metrics = (Array.isArray(metricsJson) ? metricsJson[0] : metricsJson) as FMPKeyMetricsTTM | undefined;
+  const ratios = (Array.isArray(ratiosJson) ? ratiosJson[0] : ratiosJson) as FMPRatiosTTM | undefined;
 
   if (!metrics) return null;
 
@@ -130,11 +172,14 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
  * thresholds for MVP — not sector-aware. A 30 P/E is normal for tech and
  * alarming for autos, but we ignore that nuance until we have sector
  * baseline data. Disclaimer covers this in the UI.
+ *
+ * Note: with the FMP v3→stable migration, P/E, P/B, and P/S all live in
+ * the ratios-ttm endpoint now (they used to be in key-metrics-ttm).
  */
-function valuationSignal(metrics: FMPKeyMetricsTTM): Signal {
-  const pe = metrics.peRatioTTM ?? null;
-  const pb = metrics.pbRatioTTM ?? null;
-  const ps = metrics.priceToSalesRatioTTM ?? null;
+function valuationSignal(ratios: FMPRatiosTTM): Signal {
+  const pe = ratios.priceToEarningsRatioTTM ?? null;
+  const pb = ratios.priceToBookRatioTTM ?? null;
+  const ps = ratios.priceToSalesRatioTTM ?? null;
 
   let bullish = 0;
   let bearish = 0;
@@ -165,9 +210,12 @@ function valuationSignal(metrics: FMPKeyMetricsTTM): Signal {
 /**
  * Profitability: ROE > 15% is generally great; net margin > 10% is
  * generally healthy. Negative either is a warning sign.
+ *
+ * ROE is now in key-metrics-ttm under returnOnEquityTTM. Net margin
+ * stayed in ratios-ttm.
  */
 function profitabilitySignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): Signal {
-  const roe = metrics.roeTTM ?? null;
+  const roe = metrics.returnOnEquityTTM ?? null;
   const netMargin = ratios.netProfitMarginTTM ?? null;
 
   let bullish = 0;
@@ -192,27 +240,29 @@ function profitabilitySignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): S
 }
 
 /**
- * Growth: positive net income per share is the bare minimum. We'd want
- * YoY revenue growth too, but FMP's TTM endpoints don't include it
- * directly. Using EPS as a proxy — positive and not declining is the
- * signal. Real growth signal would need historical comparisons (a v1.1
- * extension when we cache older snapshots).
+ * Growth: positive EPS on a TTM basis as the bare minimum profitability
+ * gate. True YoY growth requires historical snapshots (deferred to v1.1).
  */
-function growthSignal(metrics: FMPKeyMetricsTTM): Signal {
-  const epsTTM = metrics.netIncomePerShareTTM ?? null;
+function growthSignal(ratios: FMPRatiosTTM): Signal {
+  const epsTTM = ratios.netIncomePerShareTTM ?? null;
   if (epsTTM == null) return 'NEUTRAL';
   if (epsTTM > 0) return 'BUY'; // profitable on a TTM basis
   return 'SELL'; // losing money on a TTM basis
 }
 
 /**
- * Financial health: low debt/equity, positive FCF, current ratio > 1.5.
- * Conservative balance sheet wins.
+ * Financial health: low debt/equity, positive FCF yield, current ratio
+ * > 1.5. Conservative balance sheet wins.
+ *
+ * FCF check uses freeCashFlowYieldTTM > 0 instead of per-share value
+ * because the new stable API doesn't expose freeCashFlowPerShareTTM.
+ * Yield > 0 is mathematically equivalent to "FCF positive" so the
+ * signal logic is unchanged.
  */
-function healthSignal(metrics: FMPKeyMetricsTTM): Signal {
-  const dToE = metrics.debtToEquityTTM ?? null;
+function healthSignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): Signal {
+  const dToE = ratios.debtToEquityRatioTTM ?? null;
   const currentRatio = metrics.currentRatioTTM ?? null;
-  const fcfPerShare = metrics.freeCashFlowPerShareTTM ?? null;
+  const fcfYield = metrics.freeCashFlowYieldTTM ?? null;
 
   let bullish = 0;
   let bearish = 0;
@@ -228,9 +278,9 @@ function healthSignal(metrics: FMPKeyMetricsTTM): Signal {
     if (currentRatio > 1.5) bullish += 1;
     else if (currentRatio < 1) bearish += 1;
   }
-  if (fcfPerShare != null) {
+  if (fcfYield != null) {
     counted += 1;
-    if (fcfPerShare > 0) bullish += 1;
+    if (fcfYield > 0) bullish += 1;
     else bearish += 1;
   }
 
@@ -247,10 +297,10 @@ function aggregate(
   ratios: FMPRatiosTTM,
 ): FundamentalSignal {
   const indicators: FundamentalIndicators = {
-    valuation: valuationSignal(metrics),
+    valuation: valuationSignal(ratios),
     profitability: profitabilitySignal(metrics, ratios),
-    growth: growthSignal(metrics),
-    health: healthSignal(metrics),
+    growth: growthSignal(ratios),
+    health: healthSignal(metrics, ratios),
   };
 
   let buys = 0;
@@ -280,15 +330,15 @@ function aggregate(
     confidence,
     indicators,
     metrics: {
-      peRatio: metrics.peRatioTTM ?? null,
-      priceToBook: metrics.pbRatioTTM ?? null,
-      priceToSales: metrics.priceToSalesRatioTTM ?? null,
-      roe: metrics.roeTTM ?? null,
+      peRatio: ratios.priceToEarningsRatioTTM ?? null,
+      priceToBook: ratios.priceToBookRatioTTM ?? null,
+      priceToSales: ratios.priceToSalesRatioTTM ?? null,
+      roe: metrics.returnOnEquityTTM ?? null,
       netMargin: ratios.netProfitMarginTTM ?? null,
       revenueGrowth: null, // not exposed by TTM endpoints — v1.1 with historical
-      debtToEquity: metrics.debtToEquityTTM ?? null,
+      debtToEquity: ratios.debtToEquityRatioTTM ?? null,
       currentRatio: metrics.currentRatioTTM ?? null,
-      freeCashFlow: metrics.freeCashFlowPerShareTTM ?? null,
+      freeCashFlow: metrics.freeCashFlowYieldTTM ?? null, // yield, not per-share
     },
     fetchedAt: new Date().toISOString(),
   };
