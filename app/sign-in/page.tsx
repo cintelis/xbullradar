@@ -2,7 +2,6 @@ import { redirect } from 'next/navigation';
 import Image from 'next/image';
 import SignInForm from '@/components/auth/SignInForm';
 import { getCurrentUser } from '@/lib/auth';
-import bullradarImage from '@/public/assets/bullradar.png';
 
 interface SignInPageProps {
   searchParams: Promise<{ error?: string }>;
@@ -14,10 +13,14 @@ interface SignInPageProps {
  * renders the magic-link form with the brand bull image above it.
  *
  * Background is #142838 — a slightly lighter version of #0F1C27 so the
- * dark bull stands out instead of disappearing into the page. The image
- * uses mix-blend-mode: lighten so its pure-black backdrop blends into
- * the page background, making the bull and cyan radar appear to float
- * without a visible rectangular frame.
+ * dark bull stands out against the page bg.
+ *
+ * The bull image (public/assets/bullradar.png) has a transparent
+ * background, so it sits on the page naturally without needing a blend
+ * mode. Referenced by URL string (not static import) because files in
+ * public/ aren't eligible for Next.js static-import processing. Native
+ * source dims are 909x819; next/image resizes per-request based on the
+ * `sizes` hint.
  */
 export default async function SignInPage({ searchParams }: SignInPageProps) {
   const user = await getCurrentUser();
@@ -33,11 +36,12 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <Image
-            src={bullradarImage}
+            src="/assets/bullradar.png"
             alt="xBullRadar — bull on a sentiment radar"
+            width={909}
+            height={819}
             priority
-            placeholder="blur"
-            className="mx-auto mb-4 w-full max-w-[260px] mix-blend-lighten"
+            className="mx-auto mb-4 w-full max-w-[260px]"
             sizes="(max-width: 640px) 220px, 260px"
           />
           <h1 className="text-2xl font-semibold text-zinc-100">xBullRadar</h1>
