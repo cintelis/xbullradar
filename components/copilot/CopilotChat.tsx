@@ -6,7 +6,7 @@
 // inline by inspecting the assistant message's `ui` field.
 
 import { useState, useRef, useEffect } from 'react';
-import { Send } from 'lucide-react';
+import { Send, Trash2 } from 'lucide-react';
 import ActButton from './ActButton';
 import { Button } from '@/components/ui/button';
 import type { CopilotResponse, CopilotUiAction } from '@/types';
@@ -19,23 +19,72 @@ interface ChatMessage {
   citations?: string[];
 }
 
+const STORAGE_KEY = 'xbullradar:chat:v1';
+
+const WELCOME_MESSAGE: ChatMessage = {
+  id: 'welcome',
+  role: 'assistant',
+  content:
+    "Hi! Ask me about a stock, your portfolio, or what's trending on X right now.",
+};
+
 export default function CopilotChat() {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      content:
-        "Hi! Ask me about a stock, your portfolio, or what's trending on X right now.",
-    },
-  ]);
+  // Initial state matches the SSR render — we hydrate from localStorage in
+  // an effect to avoid hydration mismatches.
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [previousResponseId, setPreviousResponseId] = useState<string | undefined>();
+  const [hydrated, setHydrated] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Hydrate from localStorage once on mount.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.messages) && parsed.messages.length > 0) {
+          setMessages(parsed.messages);
+        }
+        if (typeof parsed?.previousResponseId === 'string') {
+          setPreviousResponseId(parsed.previousResponseId);
+        }
+      }
+    } catch {
+      // Corrupted storage — ignore and start fresh.
+    }
+    setHydrated(true);
+  }, []);
+
+  // Persist messages + Grok thread id after every change (post-hydration).
+  // Gate on `hydrated` so we don't overwrite stored history with the empty
+  // initial state on first mount.
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ messages, previousResponseId }),
+      );
+    } catch {
+      // localStorage may be full, disabled, or in a private window — ignore.
+    }
+  }, [messages, previousResponseId, hydrated]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, loading]);
+
+  function clearChat() {
+    setMessages([WELCOME_MESSAGE]);
+    setPreviousResponseId(undefined);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
 
   async function send() {
     const text = input.trim();
@@ -90,13 +139,25 @@ export default function CopilotChat() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-zinc-800 p-4">
-        <h2 className="flex items-center gap-2 font-semibold">
-          🤖 XBullRadar Assistant
-        </h2>
-        <p className="mt-1 text-xs text-zinc-500">
-          Powered by Grok · Real-time X sentiment
-        </p>
+      <div className="flex items-start justify-between border-b border-zinc-800 p-4">
+        <div>
+          <h2 className="flex items-center gap-2 font-semibold">
+            🤖 XBullRadar Assistant
+          </h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Powered by Grok · Real-time X sentiment
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={clearChat}
+          disabled={loading || messages.length <= 1}
+          title="Clear conversation"
+          aria-label="Clear conversation"
+          className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
       </div>
 
       <div ref={scrollRef} className="flex-1 space-y-4 overflow-auto p-4">
