@@ -57,7 +57,8 @@ export async function analyzeTicker(
 
 /**
  * Score many tickers in a single Grok call. Cheaper + faster than N
- * individual calls. Uses grok-3-mini by default.
+ * individual calls. Uses grok-4-1-fast-reasoning by default — same
+ * tool-calling + reasoning as the flagship at ~10x lower price.
  */
 export async function analyzeTickersBatch(
   tickers: string[],
@@ -68,7 +69,7 @@ export async function analyzeTickersBatch(
   const prompt = `${SYSTEM_PROMPT_BATCH}\n\nTickers: ${upper.join(', ')}`;
 
   const result = await callGrokResponses({
-    model: process.env.GROK_MODEL_FAST || 'grok-3-mini',
+    model: process.env.GROK_MODEL_FAST || 'grok-4-1-fast-reasoning',
     input: prompt,
     temperature: 0.2,
     tools: [recentXSearchTool(1)],
