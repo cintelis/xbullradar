@@ -93,28 +93,35 @@ export default function MarketStrip() {
   }, [data]);
 
   return (
-    <div className="flex h-10 items-stretch border-b border-zinc-800 bg-zinc-950 text-xs">
-      {/* Scrolling commodity ticker tape — left side, takes available space */}
-      <div className="flex min-w-0 flex-1 items-center overflow-hidden">
-        {loading ? (
-          <span className="px-4 text-zinc-600">Loading markets…</span>
-        ) : data?.commodities && data.commodities.length > 0 ? (
-          <Marquee items={data.commodities} />
-        ) : (
-          <span className="px-4 text-zinc-600">Markets data unavailable</span>
-        )}
-      </div>
+    <div className="border-b border-zinc-800 bg-zinc-950 text-xs">
+      {/* Mobile: marquee on top, pills stacked below as a second row.
+          Desktop: marquee + pills side-by-side in a single row.
+          The flex-col → flex-row transition happens at md (768px). */}
+      <div className="flex flex-col md:h-10 md:flex-row md:items-stretch">
+        {/* Scrolling commodity ticker tape */}
+        <div className="flex h-10 min-w-0 flex-1 items-center overflow-hidden">
+          {loading ? (
+            <span className="px-4 text-zinc-600">Loading markets…</span>
+          ) : data?.commodities && data.commodities.length > 0 ? (
+            <Marquee items={data.commodities} />
+          ) : (
+            <span className="px-4 text-zinc-600">Markets data unavailable</span>
+          )}
+        </div>
 
-      {/* Market hours pills — right side, fixed width on desktop, hidden on
-          smallest screens to keep the strip from wrapping. */}
-      <div className="hidden shrink-0 items-center gap-2 border-l border-zinc-800 px-3 md:flex">
-        {featuredExchanges.length === 0 ? (
-          <span className="text-zinc-600">—</span>
-        ) : (
-          featuredExchanges.map((ex) => (
-            <ExchangePill key={ex.exchange} exchange={ex} now={now} />
-          ))
-        )}
+        {/* Market hours pills.
+            Mobile: full-width row below marquee, horizontally scrollable
+              if all 6 pills don't fit on narrow phones.
+            Desktop: fixed-width cluster on the right side of the strip. */}
+        <div className="flex h-10 items-center gap-2 overflow-x-auto border-t border-zinc-800 px-3 md:shrink-0 md:border-l md:border-t-0">
+          {featuredExchanges.length === 0 ? (
+            <span className="text-zinc-600">—</span>
+          ) : (
+            featuredExchanges.map((ex) => (
+              <ExchangePill key={ex.exchange} exchange={ex} now={now} />
+            ))
+          )}
+        </div>
       </div>
     </div>
   );
