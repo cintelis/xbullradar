@@ -38,8 +38,8 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             width={909}
             height={819}
             priority
-            className="mx-auto mb-4 w-full max-w-[260px]"
-            sizes="(max-width: 640px) 220px, 260px"
+            className="mx-auto mb-4 w-full max-w-[320px]"
+            sizes="(max-width: 640px) 280px, 320px"
           />
           <h1 className="text-2xl font-semibold text-zinc-100">xBullRadar</h1>
           <p className="mt-1 text-sm text-zinc-400">
