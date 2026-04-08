@@ -259,3 +259,140 @@ export async function refreshDailyPrices(): Promise<CachedPrices> {
   inFlight = null;
   return getDailyPrices();
 }
+
+// ─── Historical OHLC for technical indicators ───────────────────────────────
+//
+// The grouped daily endpoint above gives us yesterday's data for ALL tickers
+// in one call. For technical indicators we need 200+ days of history per
+// ticker — the grouped endpoint can't help (we'd need 200 calls).
+//
+// Solution: Polygon's per-ticker aggregates endpoint returns N days of
+// daily OHLC for ONE ticker in a single call. So for 7 default tickers
+// we'd make 7 calls to bootstrap, then cache aggressively.
+//
+// Cache shape: xbr:history:<ticker> → { closes: [oldest, ..., newest], asOfDate }
+// TTL: 24h (price history doesn't change retroactively unless there's a split,
+// which Polygon's adjusted=true flag handles automatically).
+
+const HISTORY_KEY = (ticker: string) => `xbr:history:${ticker}`;
+const HISTORY_TTL_SECONDS = 24 * 60 * 60;
+const HISTORY_DAYS = 250; // ~12 months of trading days, enough for SMA(200)
+
+interface PolygonAggregateResult {
+  t: number;  // timestamp ms
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  vw?: number;
+  n?: number;
+}
+
+interface PolygonAggregateResponse {
+  results?: PolygonAggregateResult[];
+  resultsCount?: number;
+  status?: string;
+}
+
+export interface HistoricalCloses {
+  ticker: string;
+  /** Closes ordered oldest → newest */
+  closes: number[];
+  /** ISO date of the most recent close */
+  asOfDate: string;
+  /** ISO timestamp of when this cache entry was populated */
+  fetchedAt: string;
+}
+
+/**
+ * Fetch ~250 days of daily closes for a single ticker. Used to feed the
+ * technical indicator calculators in lib/technicals.ts.
+ *
+ * Endpoint: /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}
+ * Docs: https://massive.com/docs/rest/stocks/aggregates/aggregates
+ *
+ * Returns null if the ticker has no data (typo, delisted, OTC, etc.).
+ */
+async function fetchTickerHistory(ticker: string): Promise<HistoricalCloses | null> {
+  const to = new Date();
+  const from = new Date(to.getTime() - HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const fromStr = isoDate(from);
+  const toStr = isoDate(to);
+
+  const url = `${POLYGON_API_BASE}/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${fromStr}/${toStr}?adjusted=true&sort=asc&limit=5000&apiKey=${encodeURIComponent(getApiKey())}`;
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    if (res.status === 404) return null; // unknown ticker
+    const text = await res.text().catch(() => '');
+    throw new Error(`Polygon history ${res.status} for ${ticker}: ${text || res.statusText}`);
+  }
+
+  const data = (await res.json()) as PolygonAggregateResponse;
+  if (!data.results || data.results.length === 0) return null;
+
+  const closes = data.results.map((r) => r.c);
+  const lastTs = data.results[data.results.length - 1]?.t ?? Date.now();
+  const asOfDate = new Date(lastTs).toISOString().slice(0, 10);
+
+  return {
+    ticker: ticker.toUpperCase(),
+    closes,
+    asOfDate,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Get historical daily closes for a ticker. Reads from Upstash cache,
+ * fetches from Polygon on miss, caches with 24h TTL. Returns null if the
+ * ticker has no data on Polygon (typo, OTC, foreign listing).
+ */
+export async function getHistoricalCloses(ticker: string): Promise<HistoricalCloses | null> {
+  const upper = ticker.toUpperCase();
+  const redis = getRedis();
+
+  if (redis) {
+    const cached = await redis.get<HistoricalCloses | string>(HISTORY_KEY(upper));
+    const parsed = parseHistoryCached(cached);
+    if (parsed) return parsed;
+  }
+
+  const fresh = await fetchTickerHistory(upper);
+  if (!fresh) return null;
+
+  if (redis) {
+    await redis.set(HISTORY_KEY(upper), JSON.stringify(fresh), { ex: HISTORY_TTL_SECONDS });
+  }
+  return fresh;
+}
+
+/**
+ * Force-refresh a ticker's historical data. Used by the daily cron after
+ * each user's watchlist+portfolio scan to keep the technicals cache warm.
+ */
+export async function refreshHistoricalCloses(ticker: string): Promise<HistoricalCloses | null> {
+  const upper = ticker.toUpperCase();
+  const redis = getRedis();
+  if (redis) {
+    await redis.del(HISTORY_KEY(upper));
+  }
+  return getHistoricalCloses(upper);
+}
+
+function parseHistoryCached(raw: unknown): HistoricalCloses | null {
+  if (raw == null) return null;
+  if (typeof raw === 'object') return raw as HistoricalCloses;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as HistoricalCloses;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}

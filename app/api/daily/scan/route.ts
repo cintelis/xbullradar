@@ -2,7 +2,7 @@ import type { NextRequest } from 'next/server';
 import { analyzeTickersBatch } from '@/lib/sentiment';
 import { store } from '@/lib/store';
 import { detectAlert, sendAlert } from '@/lib/alerts';
-import { refreshDailyPrices } from '@/lib/prices';
+import { refreshDailyPrices, refreshHistoricalCloses } from '@/lib/prices';
 
 export const runtime = 'nodejs';
 
@@ -90,6 +90,19 @@ async function runScan() {
 
       totalTickers += results.length;
       perUser.push({ userId, tickerCount: results.length, alertCount });
+
+      // Warm the technical-indicators history cache for each ticker in this
+      // user's watchlist. Sequential to respect Polygon's 5/min rate limit.
+      // One ticker at a time, ~1 call per ticker, ~7-50 calls per user.
+      // Failures here are non-fatal — the on-demand fetch in /api/technicals
+      // will fall back if a particular ticker isn't pre-warmed.
+      for (const ticker of watchlist) {
+        try {
+          await refreshHistoricalCloses(ticker);
+        } catch (err) {
+          console.warn(`[daily/scan] history refresh failed for ${ticker}:`, err);
+        }
+      }
     } catch (err) {
       // One user's failure shouldn't stop the whole scan. Log and continue.
       console.error(`[daily/scan] failed for user ${userId}:`, err);
