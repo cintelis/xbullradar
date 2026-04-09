@@ -6,6 +6,7 @@ import { refreshDailyPrices, refreshHistoricalCloses } from '@/lib/prices';
 import { refreshFundamentalSignal } from '@/lib/fundamentals';
 import { refreshMarkets } from '@/lib/markets';
 import { refreshNews } from '@/lib/news';
+import { refreshEarnings } from '@/lib/earnings';
 
 export const runtime = 'nodejs';
 
@@ -138,6 +139,17 @@ async function runScan() {
           await refreshFundamentalSignal(ticker);
         } catch (err) {
           console.warn(`[daily/scan] fundamentals refresh failed for ${ticker}:`, err);
+        }
+      }
+
+      // Warm the earnings cache for each ticker — 1 FMP call per ticker
+      // hitting /stable/earnings, cached for 12h. Used by the portfolio
+      // earnings badges and the fundamentals beat/miss signal bucket.
+      for (const ticker of watchlist) {
+        try {
+          await refreshEarnings(ticker);
+        } catch (err) {
+          console.warn(`[daily/scan] earnings refresh failed for ${ticker}:`, err);
         }
       }
     } catch (err) {
