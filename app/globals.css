@@ -40,3 +40,38 @@ html, body {
 .marquee-track:hover {
   animation-play-state: paused;
 }
+
+/* Scrollbar styling — blend in with the dark theme instead of the
+   bright grey browser default. Applies globally to all scrollable
+   areas (news panel, sidebar, main content, dropdowns, modals).
+   Mobile browsers use overlay scrollbars that auto-hide so this is
+   primarily a desktop concern. */
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(39 39 42) transparent; /* zinc-800 thumb, transparent track */
+}
+
+/* WebKit (Chrome, Safari, Edge) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(39 39 42); /* zinc-800 — barely visible against zinc-950 bg */
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(63 63 70); /* zinc-700 — slightly brighter on hover */
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
