@@ -263,15 +263,27 @@ export default function PortfolioView() {
       setError('Shares must be a positive number.');
       return;
     }
-    if (rows.some((r) => r.holding.ticker === ticker)) {
-      setError(`${ticker} is already in your portfolio. Remove it first to change the share count.`);
-      return;
-    }
 
-    const next = [
-      ...rows.map((r) => ({ ticker: r.holding.ticker, shares: r.holding.shares })),
-      { ticker, shares: sharesNum },
-    ];
+    // Upsert semantics: if the ticker is already in the portfolio,
+    // overwrite its share count with the new value. We used to error
+    // ("remove it first to change") but that was a holdover from before
+    // inline-edit shipped — now that you can click any shares number to
+    // edit, the Add form makes more sense as a one-shot "set this
+    // position to this size" command.
+    const exists = rows.some((r) => r.holding.ticker === ticker);
+    const next = exists
+      ? rows.map((r) => ({
+          ticker: r.holding.ticker,
+          shares: r.holding.ticker === ticker ? sharesNum : r.holding.shares,
+        }))
+      : [
+          ...rows.map((r) => ({
+            ticker: r.holding.ticker,
+            shares: r.holding.shares,
+          })),
+          { ticker, shares: sharesNum },
+        ];
+
     try {
       await updateHoldings(next);
       setNewTicker('');
