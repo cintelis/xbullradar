@@ -20,6 +20,11 @@ import {
   type Signal,
   type CombinedSignal,
 } from '@/components/dashboard/SignalBadge';
+import {
+  EarningsBadge,
+  type EarningsBeatRecord,
+  type NextEarnings,
+} from '@/components/dashboard/EarningsBadge';
 import type { EnrichedPortfolioHolding } from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
@@ -50,6 +55,14 @@ interface FundamentalApiResponse {
   }>;
 }
 
+interface EarningsApiResponse {
+  results: Array<{
+    ticker: string;
+    next: NextEarnings | null;
+    recentBeats: EarningsBeatRecord[];
+  }>;
+}
+
 const EMPTY_TOTALS: PortfolioApiResponse['totals'] = {
   value: null,
   dayChangeAmount: null,
@@ -62,6 +75,8 @@ interface RowState {
   technicalSignal: Signal | null;
   fundamentalSignal: Signal | null;
   combined: CombinedSignal | null;
+  nextEarnings: NextEarnings | null;
+  recentBeats: EarningsBeatRecord[];
 }
 
 export default function PortfolioView() {
@@ -84,12 +99,14 @@ export default function PortfolioView() {
     const tickers = (portfolio.holdings ?? []).map((h) => h.ticker.toUpperCase());
     const technicalMap = new Map<string, Signal | null>();
     const fundamentalMap = new Map<string, Signal | null>();
+    const earningsMap = new Map<string, { next: NextEarnings | null; recentBeats: EarningsBeatRecord[] }>();
 
     if (tickers.length > 0) {
       const tickersParam = tickers.join(',');
-      const [techRes, fundRes] = await Promise.allSettled([
+      const [techRes, fundRes, earningsRes] = await Promise.allSettled([
         fetch(`/api/technicals?tickers=${tickersParam}`).then((r) => r.json() as Promise<TechnicalApiResponse>),
         fetch(`/api/fundamentals?tickers=${tickersParam}`).then((r) => r.json() as Promise<FundamentalApiResponse>),
+        fetch(`/api/earnings?tickers=${tickersParam}`).then((r) => r.json() as Promise<EarningsApiResponse>),
       ]);
 
       if (techRes.status === 'fulfilled') {
@@ -106,6 +123,16 @@ export default function PortfolioView() {
       } else {
         console.warn('[portfolio] fundamentals fetch failed', fundRes.reason);
       }
+      if (earningsRes.status === 'fulfilled') {
+        for (const r of earningsRes.value.results ?? []) {
+          earningsMap.set(r.ticker.toUpperCase(), {
+            next: r.next ?? null,
+            recentBeats: r.recentBeats ?? [],
+          });
+        }
+      } else {
+        console.warn('[portfolio] earnings fetch failed', earningsRes.reason);
+      }
     }
 
     // Sort by total value descending so the biggest position is on top.
@@ -119,9 +146,17 @@ export default function PortfolioView() {
       const upper = h.ticker.toUpperCase();
       const tech = technicalMap.get(upper) ?? null;
       const fund = fundamentalMap.get(upper) ?? null;
+      const earnings = earningsMap.get(upper);
       const sentSignal = h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null;
       const combined = combineSignals(sentSignal, tech, fund);
-      return { holding: h, technicalSignal: tech, fundamentalSignal: fund, combined };
+      return {
+        holding: h,
+        technicalSignal: tech,
+        fundamentalSignal: fund,
+        combined,
+        nextEarnings: earnings?.next ?? null,
+        recentBeats: earnings?.recentBeats ?? [],
+      };
     });
 
     setRows(merged);
@@ -350,6 +385,7 @@ export default function PortfolioView() {
               <col className="w-24" /> {/* Tech */}
               <col className="w-24" /> {/* Fund */}
               <col className="w-32" /> {/* Combined */}
+              <col className="w-24" /> {/* Earnings */}
               <col className="w-10" /> {/* × */}
             </colgroup>
             <thead className="text-xs text-zinc-500">
@@ -363,6 +399,7 @@ export default function PortfolioView() {
                 <th className="pb-2 px-2 text-right">Tech</th>
                 <th className="pb-2 px-2 text-right">Fund</th>
                 <th className="pb-2 px-2 text-right">Combined</th>
+                <th className="pb-2 px-2 text-right">Earnings</th>
                 <th className="pb-2"></th>
               </tr>
             </thead>
@@ -428,6 +465,9 @@ export default function PortfolioView() {
                     <td className="py-2 px-2 text-right">
                       <CombinedBadge signal={r.combined} />
                     </td>
+                    <td className="py-2 px-2 text-right">
+                      <EarningsBadge next={r.nextEarnings} recentBeats={r.recentBeats} />
+                    </td>
                     <td className="py-2 text-right">
                       <button
                         type="button"
@@ -456,13 +496,11 @@ export default function PortfolioView() {
                   key={h.ticker}
                   className="rounded-lg border border-zinc-800/50 bg-zinc-900/30 p-3"
                 >
-                  {/* Row 1: ticker + value + combined */}
+                  {/* Row 1: ticker + value + combined + earnings */}
                   <div className="flex items-center justify-between gap-2">
-                    <div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <p className="font-semibold text-zinc-100">{h.ticker}</p>
-                      <p className="text-xs text-zinc-500">
-                        {h.shares} {h.shares === 1 ? 'share' : 'shares'}
-                      </p>
+                      <EarningsBadge next={r.nextEarnings} recentBeats={r.recentBeats} />
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="text-right">
@@ -488,6 +526,9 @@ export default function PortfolioView() {
                       <CombinedBadge signal={r.combined} />
                     </div>
                   </div>
+                  <p className="mt-0.5 text-xs text-zinc-500">
+                    {h.shares} {h.shares === 1 ? 'share' : 'shares'}
+                  </p>
                   {/* Row 2: individual signals + remove */}
                   <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/40 pt-2">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

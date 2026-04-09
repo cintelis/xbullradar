@@ -10,6 +10,11 @@ import {
   type Signal,
   type CombinedSignal,
 } from '@/components/dashboard/SignalBadge';
+import {
+  EarningsBadge,
+  type EarningsBeatRecord,
+  type NextEarnings,
+} from '@/components/dashboard/EarningsBadge';
 import type { StockSentiment } from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
@@ -29,11 +34,21 @@ interface FundamentalApiResponse {
   }>;
 }
 
+interface EarningsApiResponse {
+  results: Array<{
+    ticker: string;
+    next: NextEarnings | null;
+    recentBeats: EarningsBeatRecord[];
+  }>;
+}
+
 interface RowState {
   sentiment: StockSentiment;
   technicalSignal: Signal | null;
   fundamentalSignal: Signal | null;
   combined: CombinedSignal | null;
+  nextEarnings: NextEarnings | null;
+  recentBeats: EarningsBeatRecord[];
 }
 
 export default function TrendingStocks() {
@@ -52,6 +67,7 @@ export default function TrendingStocks() {
       sentiments: StockSentiment[],
       technicalMap: Map<string, Signal | null>,
       fundamentalMap: Map<string, Signal | null>,
+      earningsMap: Map<string, { next: NextEarnings | null; recentBeats: EarningsBeatRecord[] }>,
     ): RowState[] => {
       // Sort by absolute sentiment score so the most "interesting" movement
       // (in either direction) lands at the top.
@@ -62,28 +78,33 @@ export default function TrendingStocks() {
         const upper = s.ticker.toUpperCase();
         const tech = technicalMap.get(upper) ?? null;
         const fund = fundamentalMap.get(upper) ?? null;
+        const earnings = earningsMap.get(upper);
         const sentSignal = s.score !== 0 ? sentimentToSignal(s.score) : null;
         return {
           sentiment: s,
           technicalSignal: tech,
           fundamentalSignal: fund,
           combined: combineSignals(sentSignal, tech, fund),
+          nextEarnings: earnings?.next ?? null,
+          recentBeats: earnings?.recentBeats ?? [],
         };
       });
     },
     [],
   );
 
-  // Fetch /api/technicals + /api/fundamentals in parallel for the given
-  // ticker set, returning two maps the merge step uses.
+  // Fetch /api/technicals + /api/fundamentals + /api/earnings in parallel
+  // for the given ticker set, returning three maps the merge step uses.
   const fetchSignals = useCallback(async (tickers: string[]) => {
     const techMap = new Map<string, Signal | null>();
     const fundMap = new Map<string, Signal | null>();
-    if (tickers.length === 0) return { techMap, fundMap };
+    const earningsMap = new Map<string, { next: NextEarnings | null; recentBeats: EarningsBeatRecord[] }>();
+    if (tickers.length === 0) return { techMap, fundMap, earningsMap };
     const tickersParam = tickers.join(',');
-    const [techRes, fundRes] = await Promise.allSettled([
+    const [techRes, fundRes, earningsRes] = await Promise.allSettled([
       fetch(`/api/technicals?tickers=${tickersParam}`).then((r) => r.json() as Promise<TechnicalApiResponse>),
       fetch(`/api/fundamentals?tickers=${tickersParam}`).then((r) => r.json() as Promise<FundamentalApiResponse>),
+      fetch(`/api/earnings?tickers=${tickersParam}`).then((r) => r.json() as Promise<EarningsApiResponse>),
     ]);
     if (techRes.status === 'fulfilled') {
       for (const r of techRes.value.results ?? []) {
@@ -99,7 +120,17 @@ export default function TrendingStocks() {
     } else {
       console.warn('[trending] fundamentals fetch failed', fundRes.reason);
     }
-    return { techMap, fundMap };
+    if (earningsRes.status === 'fulfilled') {
+      for (const r of earningsRes.value.results ?? []) {
+        earningsMap.set(r.ticker.toUpperCase(), {
+          next: r.next ?? null,
+          recentBeats: r.recentBeats ?? [],
+        });
+      }
+    } else {
+      console.warn('[trending] earnings fetch failed', earningsRes.reason);
+    }
+    return { techMap, fundMap, earningsMap };
   }, []);
 
   // Initial load: cheap GET reads last-known scores from disk (no Grok call).
@@ -110,8 +141,8 @@ export default function TrendingStocks() {
         const data = await res.json();
         const sentiments: StockSentiment[] = data.results ?? [];
         const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-        const { techMap, fundMap } = await fetchSignals(tickers);
-        setRows(mergeRows(sentiments, techMap, fundMap));
+        const { techMap, fundMap, earningsMap } = await fetchSignals(tickers);
+        setRows(mergeRows(sentiments, techMap, fundMap, earningsMap));
         if (sentiments.some((r) => r.score !== 0)) {
           setLastUpdated(new Date());
         }
@@ -138,8 +169,8 @@ export default function TrendingStocks() {
       }
       const sentiments: StockSentiment[] = data.results ?? [];
       const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-      const { techMap, fundMap } = await fetchSignals(tickers);
-      setRows(mergeRows(sentiments, techMap, fundMap));
+      const { techMap, fundMap, earningsMap } = await fetchSignals(tickers);
+      setRows(mergeRows(sentiments, techMap, fundMap, earningsMap));
       setLastUpdated(new Date());
     } catch (err) {
       setError((err as Error).message);
@@ -158,8 +189,8 @@ export default function TrendingStocks() {
     }
     const sentiments: StockSentiment[] = data.results ?? [];
     const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-    const { techMap, fundMap } = await fetchSignals(tickers);
-    setRows(mergeRows(sentiments, techMap, fundMap));
+    const { techMap, fundMap, earningsMap } = await fetchSignals(tickers);
+    setRows(mergeRows(sentiments, techMap, fundMap, earningsMap));
   }
 
   // Replace the entire watchlist server-side, then refetch the table data.
@@ -325,6 +356,7 @@ export default function TrendingStocks() {
               <col className="w-24" /> {/* Tech */}
               <col className="w-24" /> {/* Fund */}
               <col className="w-32" /> {/* Combined */}
+              <col className="w-24" /> {/* Earnings */}
               <col className="w-10" /> {/* × */}
             </colgroup>
             <thead className="text-xs text-zinc-500">
@@ -335,6 +367,7 @@ export default function TrendingStocks() {
                 <th className="pb-2 px-2 text-right">Tech</th>
                 <th className="pb-2 px-2 text-right">Fund</th>
                 <th className="pb-2 px-2 text-right">Combined</th>
+                <th className="pb-2 px-2 text-right">Earnings</th>
                 <th className="pb-2"></th>
               </tr>
             </thead>
@@ -378,6 +411,9 @@ export default function TrendingStocks() {
                   <td className="py-2 px-2 text-right">
                     <CombinedBadge signal={r.combined} />
                   </td>
+                  <td className="py-2 px-2 text-right">
+                    <EarningsBadge next={r.nextEarnings} recentBeats={r.recentBeats} />
+                  </td>
                   <td className="py-2 text-right">
                     <button
                       type="button"
@@ -405,10 +441,13 @@ export default function TrendingStocks() {
                   key={r.sentiment.ticker}
                   className="rounded-lg border border-zinc-800/50 bg-zinc-900/30 p-3"
                 >
-                  {/* Row 1: ticker + reasoning + combined */}
+                  {/* Row 1: ticker + reasoning + combined + earnings */}
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="font-semibold text-zinc-100">{r.sentiment.ticker}</p>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <p className="font-semibold text-zinc-100">{r.sentiment.ticker}</p>
+                        <EarningsBadge next={r.nextEarnings} recentBeats={r.recentBeats} />
+                      </div>
                       <p className="mt-0.5 line-clamp-2 text-xs text-zinc-500">
                         {r.sentiment.reasoning || '—'}
                       </p>
