@@ -30,11 +30,11 @@ import { getEarnings, getEarningsBeatRate } from './earnings';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
 const CACHE_TTL_SECONDS = 48 * 60 * 60; // 48 hours
-// Bumped to v3 when the consistency (earnings beat/miss) bucket was
-// added to the signal aggregation. The cached signal shape changed —
-// old v2 entries don't have the new indicator field — so the key bump
-// forces a fresh recompute on next read instead of stale cache hits.
-const FUND_KEY = (ticker: string) => `xbr:fundamentals:v3:${ticker}`;
+// Bumped to v4 when the growth signal switched from a degenerate
+// "EPS positive on TTM" proxy to real YoY revenue + EPS growth
+// computed from /stable/income-statement annual records. The cached
+// signal shape now includes revenueGrowth and epsGrowth fields.
+const FUND_KEY = (ticker: string) => `xbr:fundamentals:v4:${ticker}`;
 
 export interface FundamentalIndicators {
   valuation: Signal;     // P/E, P/B, P/S — is the stock cheap or expensive?
@@ -107,6 +107,31 @@ interface FMPRatiosTTM {
 }
 
 /**
+ * FMP /stable/income-statement annual record (only fields we read).
+ * Used by the growth signal to compute real YoY revenue and EPS
+ * growth instead of the degenerate "EPS positive" proxy.
+ */
+interface FMPIncomeStatement {
+  symbol?: string;
+  fiscalYear?: string | number;
+  date?: string;
+  revenue?: number;
+  eps?: number;
+  epsdiluted?: number;
+}
+
+interface YoyGrowth {
+  /** Most recent annual revenue */
+  latestRevenue: number | null;
+  /** Year-over-year revenue growth, decimal (0.10 = 10%) */
+  revenueGrowth: number | null;
+  /** Most recent annual EPS (diluted preferred) */
+  latestEps: number | null;
+  /** Year-over-year EPS growth, decimal */
+  epsGrowth: number | null;
+}
+
+/**
  * Detect FMP error responses that come back as 200 OK with an error body.
  * Both "Legacy Endpoint" and "Premium Query Parameter" errors use this
  * pattern instead of HTTP status codes. Returns true if the body looks
@@ -122,15 +147,21 @@ function isFMPErrorBody(body: unknown): boolean {
  * the ticker is unknown to FMP OR not covered by the current subscription
  * tier (small caps, recent IPOs, ETFs). Throws only on real API errors
  * like network failure or auth problems.
+ *
+ * Now also fetches the last 2 years of annual income statements so the
+ * growth signal can compute real YoY growth instead of the degenerate
+ * "EPS positive" proxy. The income statement call is independent — if
+ * it fails (e.g. ETF) the growth signal falls back to NEUTRAL.
  */
 async function fetchFundamentalsRaw(ticker: string): Promise<{
   metrics: FMPKeyMetricsTTM;
   ratios: FMPRatiosTTM;
+  growth: YoyGrowth;
 } | null> {
   const apiKey = encodeURIComponent(getApiKey());
   const upper = ticker.toUpperCase();
 
-  const [metricsRes, ratiosRes] = await Promise.all([
+  const [metricsRes, ratiosRes, incomeRes] = await Promise.all([
     fetch(`${FMP_API_BASE}/key-metrics-ttm?symbol=${encodeURIComponent(upper)}&apikey=${apiKey}`, {
       headers: { Accept: 'application/json' },
       cache: 'no-store',
@@ -139,6 +170,10 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
       headers: { Accept: 'application/json' },
       cache: 'no-store',
     }),
+    fetch(
+      `${FMP_API_BASE}/income-statement?symbol=${encodeURIComponent(upper)}&period=annual&limit=2&apikey=${apiKey}`,
+      { headers: { Accept: 'application/json' }, cache: 'no-store' },
+    ),
   ]);
 
   if (!metricsRes.ok || !ratiosRes.ok) {
@@ -151,10 +186,12 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
 
   const metricsJson = (await metricsRes.json()) as unknown;
   const ratiosJson = (await ratiosRes.json()) as unknown;
+  // Income statement is non-fatal — parse defensively
+  const incomeJson: unknown = incomeRes.ok ? await incomeRes.json().catch(() => null) : null;
 
   // FMP returns errors as 200 OK with `{ "Error Message": "..." }` in the body.
-  // Treat as "no data available" — the UI shows "—" in the Fund column rather
-  // than crashing the whole portfolio request.
+  // Treat fundamentals errors as "no data available" — the UI shows "—" in
+  // the Fund column rather than crashing the whole portfolio request.
   if (isFMPErrorBody(metricsJson) || isFMPErrorBody(ratiosJson)) {
     const errMsg =
       (metricsJson as { ['Error Message']?: string })?.['Error Message'] ??
@@ -170,7 +207,61 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
 
   if (!metrics) return null;
 
-  return { metrics, ratios: ratios ?? {} };
+  // Parse the annual income statements into YoY growth percentages
+  const growth = parseGrowthFromIncome(incomeJson);
+
+  return { metrics, ratios: ratios ?? {}, growth };
+}
+
+/**
+ * Parse two consecutive annual income statements into YoY growth.
+ * Records are returned newest-first by FMP. Falls back gracefully to
+ * all-nulls if the response is missing or only has one year.
+ */
+function parseGrowthFromIncome(json: unknown): YoyGrowth {
+  const empty: YoyGrowth = {
+    latestRevenue: null,
+    revenueGrowth: null,
+    latestEps: null,
+    epsGrowth: null,
+  };
+
+  if (!Array.isArray(json) || isFMPErrorBody(json)) return empty;
+  const records = json as FMPIncomeStatement[];
+  if (records.length < 1) return empty;
+
+  const latest = records[0];
+  const previous = records.length >= 2 ? records[1] : null;
+
+  const latestRevenue = typeof latest.revenue === 'number' ? latest.revenue : null;
+  const previousRevenue = typeof previous?.revenue === 'number' ? previous.revenue : null;
+  const revenueGrowth =
+    latestRevenue != null && previousRevenue != null && previousRevenue > 0
+      ? (latestRevenue - previousRevenue) / previousRevenue
+      : null;
+
+  // Prefer diluted EPS where available — it's the more conservative number
+  const latestEps =
+    typeof latest.epsdiluted === 'number'
+      ? latest.epsdiluted
+      : typeof latest.eps === 'number'
+        ? latest.eps
+        : null;
+  const previousEps =
+    typeof previous?.epsdiluted === 'number'
+      ? previous.epsdiluted
+      : typeof previous?.eps === 'number'
+        ? previous.eps
+        : null;
+  // EPS growth is meaningful only when previous EPS was positive — comparing
+  // two negative EPS or going from negative to positive produces nonsense
+  // percentages. Fall back to null in those cases.
+  const epsGrowth =
+    latestEps != null && previousEps != null && previousEps > 0
+      ? (latestEps - previousEps) / previousEps
+      : null;
+
+  return { latestRevenue, revenueGrowth, latestEps, epsGrowth };
 }
 
 // ─── Per-bucket signal classification ───────────────────────────────────────
@@ -248,14 +339,41 @@ function profitabilitySignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): S
 }
 
 /**
- * Growth: positive EPS on a TTM basis as the bare minimum profitability
- * gate. True YoY growth requires historical snapshots (deferred to v1.1).
+ * Growth: real YoY revenue + EPS growth from annual income statements.
+ * Replaces the previous degenerate "EPS positive on TTM" proxy.
+ *
+ * Sub-vote across two metrics:
+ *   Revenue growth > 15% → bullish, < 0% → bearish, else → neutral
+ *   EPS growth     > 15% → bullish, < 0% → bearish, else → neutral
+ *
+ * Sector-naive thresholds for now (Sprint B2 will fix). 15% YoY growth
+ * is a reasonable "growing fast enough to matter" cutoff for most
+ * sectors; flat or negative growth is bearish for most sectors.
+ *
+ * Returns NEUTRAL if neither growth metric is available (e.g., ETF,
+ * recent IPO with only one year of history, or company recovering
+ * from a loss year where the previous EPS was negative).
  */
-function growthSignal(ratios: FMPRatiosTTM): Signal {
-  const epsTTM = ratios.netIncomePerShareTTM ?? null;
-  if (epsTTM == null) return 'NEUTRAL';
-  if (epsTTM > 0) return 'BUY'; // profitable on a TTM basis
-  return 'SELL'; // losing money on a TTM basis
+function growthSignal(growth: YoyGrowth): Signal {
+  let bullish = 0;
+  let bearish = 0;
+  let counted = 0;
+
+  if (growth.revenueGrowth != null) {
+    counted += 1;
+    if (growth.revenueGrowth > 0.15) bullish += 1;
+    else if (growth.revenueGrowth < 0) bearish += 1;
+  }
+  if (growth.epsGrowth != null) {
+    counted += 1;
+    if (growth.epsGrowth > 0.15) bullish += 1;
+    else if (growth.epsGrowth < 0) bearish += 1;
+  }
+
+  if (counted === 0) return 'NEUTRAL';
+  if (bullish > bearish && bullish >= Math.ceil(counted / 2)) return 'BUY';
+  if (bearish > bullish && bearish >= Math.ceil(counted / 2)) return 'SELL';
+  return 'NEUTRAL';
 }
 
 /**
@@ -323,12 +441,13 @@ function consistencySignal(beatRate: number | null): Signal {
 function aggregate(
   metrics: FMPKeyMetricsTTM,
   ratios: FMPRatiosTTM,
+  growth: YoyGrowth,
   beatRate: number | null,
 ): FundamentalSignal {
   const indicators: FundamentalIndicators = {
     valuation: valuationSignal(ratios),
     profitability: profitabilitySignal(metrics, ratios),
-    growth: growthSignal(ratios),
+    growth: growthSignal(growth),
     health: healthSignal(metrics, ratios),
     consistency: consistencySignal(beatRate),
   };
@@ -365,7 +484,7 @@ function aggregate(
       priceToSales: ratios.priceToSalesRatioTTM ?? null,
       roe: metrics.returnOnEquityTTM ?? null,
       netMargin: ratios.netProfitMarginTTM ?? null,
-      revenueGrowth: null, // not exposed by TTM endpoints — Sprint B1 will fix
+      revenueGrowth: growth.revenueGrowth, // ← real YoY now, not null
       debtToEquity: ratios.debtToEquityRatioTTM ?? null,
       currentRatio: metrics.currentRatioTTM ?? null,
       freeCashFlow: metrics.freeCashFlowYieldTTM ?? null, // yield, not per-share
@@ -433,7 +552,7 @@ export async function getFundamentalSignal(ticker: string): Promise<FundamentalS
   if (!raw) return null;
 
   const beatRate = getEarningsBeatRate(earningsCache);
-  const fresh = aggregate(raw.metrics, raw.ratios, beatRate);
+  const fresh = aggregate(raw.metrics, raw.ratios, raw.growth, beatRate);
 
   if (redis) {
     await redis.set(FUND_KEY(upper), JSON.stringify(fresh), { ex: CACHE_TTL_SECONDS });
