@@ -288,42 +288,67 @@ export default function PortfolioView() {
         </div>
       </header>
 
-      {/* Totals strip */}
-      {rows.length > 0 && totals.value != null && (
-        <div className="mb-4 grid grid-cols-3 gap-3 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-3">
-          <Totals label="Total value" value={formatCurrency(totals.value)} />
-          <Totals
-            label="Day change"
-            value={formatChange(totals.dayChangeAmount, totals.dayChangePercent)}
-            tone={
-              totals.dayChangeAmount == null
-                ? 'neutral'
-                : totals.dayChangeAmount > 0
-                  ? 'positive'
-                  : totals.dayChangeAmount < 0
-                    ? 'negative'
-                    : 'neutral'
-            }
-          />
-          <Totals
-            label="Sentiment"
-            value={
-              totals.weightedSentiment != null
-                ? `${totals.weightedSentiment > 0 ? '+' : ''}${totals.weightedSentiment.toFixed(2)}`
-                : '—'
-            }
-            tone={
-              totals.weightedSentiment == null
-                ? 'neutral'
-                : totals.weightedSentiment > 0.1
-                  ? 'positive'
-                  : totals.weightedSentiment < -0.1
-                    ? 'negative'
-                    : 'neutral'
-            }
-          />
-        </div>
-      )}
+      {/* Totals strip — value-weighted aggregates across the portfolio.
+          ERP is the "Fed Model applied to a portfolio" — tells you whether
+          your equity exposure as a whole is well-compensated vs holding
+          treasuries. Same thresholds as the per-stock ERP badge:
+          > 4% CHEAP, 2-4% FAIR, < 2% RICH. */}
+      {rows.length > 0 && totals.value != null && (() => {
+        const portfolioERP = computeWeightedErp(rows);
+        return (
+          <div className="mb-4 grid grid-cols-2 gap-3 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-3 md:grid-cols-4">
+            <Totals label="Total value" value={formatCurrency(totals.value)} />
+            <Totals
+              label="Day change"
+              value={formatChange(totals.dayChangeAmount, totals.dayChangePercent)}
+              tone={
+                totals.dayChangeAmount == null
+                  ? 'neutral'
+                  : totals.dayChangeAmount > 0
+                    ? 'positive'
+                    : totals.dayChangeAmount < 0
+                      ? 'negative'
+                      : 'neutral'
+              }
+            />
+            <Totals
+              label="Portfolio ERP"
+              title="Value-weighted Equity Risk Premium across all holdings (Fed Model). Above 4% = cheap vs bonds, 2-4% = fair, below 2% = rich. Cash and holdings without P/E are excluded."
+              value={
+                portfolioERP != null
+                  ? `${portfolioERP >= 0 ? '+' : ''}${portfolioERP.toFixed(1)}%`
+                  : '—'
+              }
+              tone={
+                portfolioERP == null
+                  ? 'neutral'
+                  : portfolioERP > 4
+                    ? 'positive'
+                    : portfolioERP < 2
+                      ? 'negative'
+                      : 'neutral'
+              }
+            />
+            <Totals
+              label="Sentiment"
+              value={
+                totals.weightedSentiment != null
+                  ? `${totals.weightedSentiment > 0 ? '+' : ''}${totals.weightedSentiment.toFixed(2)}`
+                  : '—'
+              }
+              tone={
+                totals.weightedSentiment == null
+                  ? 'neutral'
+                  : totals.weightedSentiment > 0.1
+                    ? 'positive'
+                    : totals.weightedSentiment < -0.1
+                      ? 'negative'
+                      : 'neutral'
+              }
+            />
+          </div>
+        );
+      })()}
 
       {adding && (
         <form onSubmit={addHolding} className="mb-3 flex items-center gap-2">
@@ -601,10 +626,13 @@ function Totals({
   label,
   value,
   tone = 'neutral',
+  title,
 }: {
   label: string;
   value: string;
   tone?: 'positive' | 'negative' | 'neutral';
+  /** Optional native tooltip explaining what the metric is. */
+  title?: string;
 }) {
   const toneClass =
     tone === 'positive'
@@ -613,11 +641,33 @@ function Totals({
         ? 'text-red-400'
         : 'text-zinc-200';
   return (
-    <div>
+    <div title={title}>
       <p className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</p>
       <p className={`mt-0.5 font-mono text-sm font-semibold ${toneClass}`}>{value}</p>
     </div>
   );
+}
+
+/**
+ * Value-weighted Equity Risk Premium across the portfolio. Returns null
+ * if no holding has both a known position value AND a known ERP. Mirrors
+ * the weightedSentiment math computed server-side in /api/portfolio.
+ *
+ * Holdings without a P/E (e.g. ETFs, unprofitable companies, or names
+ * still warming the fundamentals cache) are excluded from BOTH the
+ * numerator and the denominator — so the resulting average is over the
+ * subset of the portfolio for which ERP is actually defined.
+ */
+function computeWeightedErp(rows: RowState[]): number | null {
+  let numerator = 0;
+  let denominator = 0;
+  for (const r of rows) {
+    if (r.holding.value != null && r.equityRiskPremium != null) {
+      numerator += r.holding.value * r.equityRiskPremium;
+      denominator += r.holding.value;
+    }
+  }
+  return denominator > 0 ? numerator / denominator : null;
 }
 
 function formatCurrency(value: number): string {
