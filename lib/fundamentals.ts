@@ -29,7 +29,13 @@ import type { Signal } from './technicals';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
 const CACHE_TTL_SECONDS = 48 * 60 * 60; // 48 hours
-const FUND_KEY = (ticker: string) => `xbr:fundamentals:${ticker}`;
+// Bumped to v2 when the FMP plan upgraded from Basic → Starter, which
+// unlocked coverage for small-cap and ETF tickers (ITRI, QBTS, OKLO,
+// BUG) that were returning "Premium Query Parameter" errors on Basic
+// and getting cached as null. Bumping the key forces a fresh fetch on
+// the next read so the new tier coverage takes effect immediately
+// instead of waiting up to 48h for the old TTL to expire.
+const FUND_KEY = (ticker: string) => `xbr:fundamentals:v2:${ticker}`;
 
 export interface FundamentalIndicators {
   valuation: Signal;     // P/E, P/B, P/S — is the stock cheap or expensive?

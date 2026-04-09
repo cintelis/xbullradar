@@ -56,10 +56,11 @@ async function runScan() {
 
   // Refresh the news cache so the right-sidebar NewsPanel has fresh
   // content for morning users instead of paying the cold-cache cost
-  // themselves. Non-fatal — news is decorative when chat is showing.
+  // themselves. Warms all 4 category caches in sequence. Non-fatal —
+  // news is decorative when chat is showing.
   try {
-    const news = await refreshNews();
-    console.log(`[daily/scan] refreshed news cache, ${news.articles.length} articles`);
+    await refreshNews();
+    console.log('[daily/scan] refreshed news cache (4 categories)');
   } catch (err) {
     console.error('[daily/scan] news cache refresh failed', err);
   }

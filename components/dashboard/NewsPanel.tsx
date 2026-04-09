@@ -2,12 +2,16 @@
 
 // Vertical scrollable news feed for the dashboard sidebar.
 //
-// Replaces the placeholder that used to live in the chat-hidden state.
-// Articles come from /api/news (FMP /stable/fmp-articles, cached
-// server-side at 20-minute TTL). Polls every 10 minutes for fresh data.
+// Sources from /api/news (FMP /stable/news/{general,stock,crypto,forex}-latest
+// via lib/news.ts, cached server-side at 5-minute TTL on the FMP Starter
+// plan). Polls every 2 minutes for fresh data.
 //
-// Manual refresh button: rate-limited to one click per 5 minutes per
-// browser via local state to prevent quota burn from impatient clicking.
+// 4 category tabs: All / Stocks / Crypto / Forex. The "All" tab merges
+// general + stock + crypto + forex sorted by publishedDate descending.
+//
+// Manual refresh button: rate-limited to one click per 60 seconds per
+// browser. With Starter's 300/min rate limit, this is mostly belt-and-
+// suspenders for very impatient clicking.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, Newspaper, RefreshCw } from 'lucide-react';
@@ -20,65 +24,94 @@ interface NewsArticle {
   tickers: string[];
   imageUrl: string | null;
   link: string;
+  publisher: string | null;
+  site: string | null;
+  category: 'general' | 'stock' | 'crypto' | 'forex';
 }
 
 interface NewsApiResponse {
   articles: NewsArticle[];
   fetchedAt: string | null;
+  category: string;
 }
 
-const POLL_INTERVAL_MS = 10 * 60 * 1000;     // 10 minutes
-const MANUAL_REFRESH_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+type TabKey = 'all' | 'stock' | 'crypto' | 'forex';
+
+const POLL_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const MANUAL_REFRESH_COOLDOWN_MS = 60 * 1000; // 60 seconds
+
+const TABS: Array<{ key: TabKey; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'stock', label: 'Stocks' },
+  { key: 'crypto', label: 'Crypto' },
+  { key: 'forex', label: 'Forex' },
+];
 
 export default function NewsPanel() {
-  const [articles, setArticles] = useState<NewsArticle[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<TabKey>('all');
+  const [articlesByTab, setArticlesByTab] = useState<Record<TabKey, NewsArticle[]>>({
+    all: [],
+    stock: [],
+    crypto: [],
+    forex: [],
+  });
+  const [loadingTab, setLoadingTab] = useState<TabKey | null>('all');
   const [refreshing, setRefreshing] = useState(false);
-  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
+  const [lastFetchedAt, setLastFetchedAt] = useState<Record<TabKey, string | null>>({
+    all: null,
+    stock: null,
+    crypto: null,
+    forex: null,
+  });
   const [refreshCooldownUntil, setRefreshCooldownUntil] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const cancelRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async () => {
+  const loadTab = useCallback(async (tab: TabKey) => {
     try {
-      const res = await fetch('/api/news');
+      const res = await fetch(`/api/news?category=${tab}`);
       if (!res.ok) return;
       const data = (await res.json()) as NewsApiResponse;
       if (cancelRef.current) return;
-      setArticles(data.articles ?? []);
-      setLastFetchedAt(data.fetchedAt);
+      setArticlesByTab((prev) => ({ ...prev, [tab]: data.articles ?? [] }));
+      setLastFetchedAt((prev) => ({ ...prev, [tab]: data.fetchedAt }));
     } catch {
       // News is decorative — silent fail keeps the sidebar healthy
     }
   }, []);
 
-  // Initial load + polling
+  // Initial load + polling for the active tab
   useEffect(() => {
     cancelRef.current = false;
-    setLoading(true);
-    load().finally(() => {
-      if (!cancelRef.current) setLoading(false);
+    setLoadingTab(activeTab);
+    loadTab(activeTab).finally(() => {
+      if (!cancelRef.current) setLoadingTab(null);
     });
-    const id = setInterval(load, POLL_INTERVAL_MS);
+    const id = setInterval(() => loadTab(activeTab), POLL_INTERVAL_MS);
     return () => {
       cancelRef.current = true;
       clearInterval(id);
     };
-  }, [load]);
+  }, [activeTab, loadTab]);
 
-  // Tick the relative-time clock every 30s so "2m ago" updates as
-  // articles age, without needing to refetch.
+  // Tick the relative-time clock every 30s so "2m ago" updates
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30 * 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Reset scroll to top when switching tabs
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'instant' });
+  }, [activeTab]);
 
   async function manualRefresh() {
     if (refreshing) return;
     if (Date.now() < refreshCooldownUntil) return;
     setRefreshing(true);
     try {
-      await load();
+      await loadTab(activeTab);
       setRefreshCooldownUntil(Date.now() + MANUAL_REFRESH_COOLDOWN_MS);
     } finally {
       setRefreshing(false);
@@ -86,6 +119,9 @@ export default function NewsPanel() {
   }
 
   const cooldownActive = now < refreshCooldownUntil;
+  const articles = articlesByTab[activeTab];
+  const fetchedAt = lastFetchedAt[activeTab];
+  const isLoading = loadingTab === activeTab && articles.length === 0;
 
   return (
     <section className="flex min-h-[400px] flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
@@ -97,9 +133,9 @@ export default function NewsPanel() {
           </h2>
         </div>
         <div className="flex items-center gap-3">
-          {lastFetchedAt && (
-            <span className="text-[10px] text-zinc-600" title={`Cache updated ${lastFetchedAt}`}>
-              {formatRelative(new Date(lastFetchedAt).getTime(), now)}
+          {fetchedAt && (
+            <span className="text-[10px] text-zinc-600" title={`Cache updated ${fetchedAt}`}>
+              {formatRelative(new Date(fetchedAt).getTime(), now)}
             </span>
           )}
           <button
@@ -108,7 +144,7 @@ export default function NewsPanel() {
             disabled={refreshing || cooldownActive}
             title={
               cooldownActive
-                ? 'Refresh available again in a few minutes'
+                ? 'Refresh available again in a moment'
                 : 'Refresh news'
             }
             aria-label="Refresh news"
@@ -119,15 +155,35 @@ export default function NewsPanel() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto">
-        {loading && articles.length === 0 ? (
+      {/* Category tabs */}
+      <div className="flex border-b border-zinc-800/60" role="tablist">
+        {TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`flex-1 border-b-2 px-2 py-2 text-[11px] font-semibold uppercase tracking-wide transition ${
+              activeTab === tab.key
+                ? 'border-green-500 text-zinc-100'
+                : 'border-transparent text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        {isLoading ? (
           <p className="px-4 py-6 text-sm text-zinc-500">Loading news…</p>
         ) : articles.length === 0 ? (
           <p className="px-4 py-6 text-sm text-zinc-500">No articles right now.</p>
         ) : (
           <ul className="divide-y divide-zinc-800/60">
             {articles.map((article) => (
-              <ArticleCard key={article.id} article={article} now={now} />
+              <ArticleCard key={`${article.category}-${article.id}`} article={article} now={now} />
             ))}
           </ul>
         )}
@@ -159,16 +215,19 @@ function ArticleCard({ article, now }: { article: NewsArticle; now: number }) {
               loading="lazy"
               className="h-14 w-14 shrink-0 rounded-md border border-zinc-800/60 object-cover"
               onError={(e) => {
-                // Hide broken images instead of showing the alt text frame
                 (e.currentTarget as HTMLImageElement).style.display = 'none';
               }}
             />
           )}
           <div className="min-w-0 flex-1">
-            <div className="mb-1 flex items-center gap-2 text-[10px] text-zinc-500">
-              <span className="font-mono">
-                {formatRelative(publishedMs, now)}
-              </span>
+            <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-zinc-500">
+              <span className="font-mono">{formatRelative(publishedMs, now)}</span>
+              {article.publisher && (
+                <>
+                  <span className="text-zinc-700">•</span>
+                  <span className="truncate text-zinc-400">{article.publisher}</span>
+                </>
+              )}
               {article.tickers.length > 0 && (
                 <>
                   <span className="text-zinc-700">•</span>
@@ -188,7 +247,7 @@ function ArticleCard({ article, now }: { article: NewsArticle; now: number }) {
                 </>
               )}
             </div>
-            <h3 className="line-clamp-2 text-sm font-semibold text-zinc-200 group-hover:text-zinc-100">
+            <h3 className="line-clamp-2 text-sm font-semibold text-zinc-200">
               {article.title}
             </h3>
             {article.preview && (
