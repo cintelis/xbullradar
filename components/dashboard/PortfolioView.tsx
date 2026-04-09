@@ -25,7 +25,7 @@ import {
   type EarningsBeatRecord,
   type NextEarnings,
 } from '@/components/dashboard/EarningsBadge';
-import { ERPBadge } from '@/components/dashboard/ERPBadge';
+import { ERPBadge, formatErp } from '@/components/dashboard/ERPBadge';
 import { EditableNumber } from '@/components/dashboard/EditableNumber';
 import type {
   CashCategory,
@@ -477,12 +477,8 @@ export default function PortfolioView() {
             />
             <Totals
               label="Portfolio ERP"
-              title="Value-weighted Equity Risk Premium across all holdings (Fed Model). Above 4% = cheap vs bonds, 2-4% = fair, below 2% = rich. Cash and holdings without P/E are excluded."
-              value={
-                portfolioERP != null
-                  ? `${portfolioERP >= 0 ? '+' : ''}${portfolioERP.toFixed(1)}%`
-                  : '—'
-              }
+              title="Value-weighted Equity Risk Premium across all holdings (Fed Model). Above 4% = cheap vs bonds, 2-4% = fair, below 2% = rich. Cash dilutes toward 0; holdings without P/E are excluded from the equity-weighted side."
+              value={portfolioERP != null ? formatErp(portfolioERP) : '—'}
               tone={
                 portfolioERP == null
                   ? 'neutral'

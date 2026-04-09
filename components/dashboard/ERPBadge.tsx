@@ -34,7 +34,7 @@ export function ERPBadge({ erp }: ERPBadgeProps) {
   }
 
   const config = classify(erp);
-  const sign = erp >= 0 ? '+' : '';
+  const display = formatErp(erp);
   const tooltip = buildTooltip(erp, config.label);
 
   return (
@@ -44,12 +44,25 @@ export function ERPBadge({ erp }: ERPBadgeProps) {
     >
       <config.Icon className="h-2.5 w-2.5" />
       {config.label}
-      <span className="ml-0.5 font-mono text-zinc-300">
-        {sign}
-        {erp.toFixed(1)}%
-      </span>
+      <span className="ml-0.5 font-mono text-zinc-300">{display}</span>
     </span>
   );
+}
+
+/**
+ * Format an ERP number for display. Avoids the "-0.0%" eyesore by:
+ *
+ *   1. If |erp| < 0.05 the rounded-to-1dp value is "0.0", so we just
+ *      return "0.0%" with no sign.
+ *   2. Otherwise show "+1.3%" or "-1.0%" with the right sign.
+ *
+ * Returns the full string including the percent sign so callers don't
+ * have to know about the formatting rules.
+ */
+export function formatErp(erp: number): string {
+  if (Math.abs(erp) < 0.05) return '0.0%';
+  const sign = erp > 0 ? '+' : '';
+  return `${sign}${erp.toFixed(1)}%`;
 }
 
 function classify(erp: number): {
