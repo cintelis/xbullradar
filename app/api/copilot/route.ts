@@ -1,6 +1,9 @@
 import { NextRequest } from 'next/server';
 import { analyzeTicker } from '@/lib/sentiment';
+import { callGrokResponses, recentXSearchTool } from '@/lib/grok';
 import { getCurrentUser } from '@/lib/auth';
+import { INVESTING_SYSTEM_PROMPT } from '@/lib/copilot/prompt';
+import { loadPortfolioContext } from '@/lib/copilot/context';
 import type { CopilotRequest, CopilotResponse } from '@/types';
 
 export const runtime = 'nodejs';
@@ -33,7 +36,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const reply = await routeIntent(message, body.previousResponseId);
+    const reply = await routeIntent(message, user.id, body.previousResponseId);
     return Response.json(reply satisfies CopilotResponse);
   } catch (err) {
     console.error('[copilot] failed', err);
@@ -46,32 +49,118 @@ export async function POST(request: NextRequest) {
   }
 }
 
+/**
+ * Words that signal the user is asking a *question* about a ticker rather
+ * than just dropping a symbol for a sentiment scan. When any of these are
+ * present we route through the conversational handler instead of collapsing
+ * the message to a one-line sentiment template.
+ */
+const NUANCED_QUESTION_WORDS = [
+  'why',
+  'how',
+  'should',
+  'would',
+  'could',
+  'think',
+  'thoughts',
+  'opinion',
+  'compare',
+  'vs',
+  'versus',
+  'explain',
+  'tell me',
+  'analyze',
+  'analyse',
+  'worth',
+  'overvalued',
+  'undervalued',
+  'cheap',
+  'expensive',
+  'moat',
+  'risk',
+  'thesis',
+  'buffett',
+  'lynch',
+  'munger',
+  'greenblatt',
+  'damodaran',
+  'value investor',
+  'growth investor',
+];
+
 async function routeIntent(
   message: string,
+  userId: string,
   previousResponseId?: string,
 ): Promise<CopilotResponse> {
   const lower = message.toLowerCase();
 
-  if (lower.includes('portfolio') || lower.includes('my holdings')) {
-    return handlePortfolio(previousResponseId);
-  }
-
+  // "What's hot" / "trending" still goes through the structured discover
+  // handler because it surfaces an Act button card. Portfolio questions
+  // used to have their own structured handler too, but the conversational
+  // bot now loads the real portfolio snapshot and can answer those better,
+  // so we let those fall through.
   if (
-    lower.includes('hot') ||
+    lower.includes("what's hot") ||
+    lower.includes('whats hot') ||
     lower.includes('trending') ||
     lower.includes('discover')
   ) {
     return handleDiscover(previousResponseId);
   }
 
-  // Ticker pattern: $NVDA, NVDA, etc. — 2-5 uppercase letters.
+  // Ticker pattern: $NVDA, NVDA, etc. Two routes from here:
+  //   - Bare ticker / very short message → sentiment scan (structured)
+  //   - Ticker inside a real question → conversational
   const tickerMatch = message.match(/\$?([A-Z]{2,5})\b/);
-  if (tickerMatch) {
+  const isNuanced = NUANCED_QUESTION_WORDS.some((w) => lower.includes(w));
+  const wordCount = message.trim().split(/\s+/).length;
+
+  if (tickerMatch && !isNuanced && wordCount <= 3) {
     return handleTicker(tickerMatch[1], previousResponseId);
   }
 
-  // Default fallback: treat as a general market question, point at NVDA.
-  return handleTicker('NVDA', previousResponseId);
+  // Everything else — questions with or without tickers — goes through the
+  // conversational co-pilot with the investing system prompt.
+  return handleConversational(message, userId, previousResponseId);
+}
+
+/**
+ * Conversational mode — calls Grok directly with the investing system
+ * prompt and lets it answer freely. Uses x_search so the bot can ground
+ * its answer in recent X chatter when the question is time-sensitive.
+ *
+ * Loads the user's portfolio + cached signals and prepends them to the
+ * message as a snapshot block, so the bot can reason over the user's
+ * actual positions instead of speaking in generalities.
+ */
+async function handleConversational(
+  message: string,
+  userId: string,
+  previousResponseId?: string,
+): Promise<CopilotResponse> {
+  const portfolioSnapshot = await loadPortfolioContext(userId).catch((err) => {
+    console.warn('[copilot] portfolio context load failed', err);
+    return null;
+  });
+
+  const fullInput = portfolioSnapshot
+    ? `${portfolioSnapshot}\n\n---\n\nUser question: ${message}`
+    : message;
+
+  const result = await callGrokResponses({
+    input: fullInput,
+    instructions: INVESTING_SYSTEM_PROMPT,
+    previous_response_id: previousResponseId,
+    temperature: 0.4,
+    tools: [recentXSearchTool(2), { type: 'web_search' }],
+  });
+
+  return {
+    message: result.output_text,
+    responseId: result.id,
+    citations: result.citations,
+  };
 }
 
 async function handleTicker(
@@ -101,42 +190,6 @@ async function handleTicker(
     message: `Sentiment for **${sentiment.ticker}** is ${sentiment.score.toFixed(2)}. ${sentiment.reasoning}`,
     responseId: sentiment.responseId,
     citations: sentiment.citations,
-  };
-}
-
-async function handlePortfolio(previousResponseId?: string): Promise<CopilotResponse> {
-  // MVP placeholder: hard-coded watchlist. Later: pull from a real store.
-  const watchlist = ['NVDA', 'TSLA', 'AAPL'];
-  const results = await Promise.all(
-    watchlist.map((t) => analyzeTicker(t, previousResponseId).catch(() => null)),
-  );
-  const valid = results.filter((r): r is NonNullable<typeof r> => r !== null);
-  const top = valid.sort((a, b) => b.score - a.score)[0];
-
-  if (top && top.score > 0.5) {
-    return {
-      message: `Across your watchlist (${watchlist.join(', ')}), **${top.ticker}** is the strongest right now at ${top.score.toFixed(2)}.`,
-      ui: {
-        type: 'showActButton',
-        props: {
-          ticker: top.ticker,
-          ondoSymbol: `${top.ticker.toLowerCase()}on`,
-          sentimentScore: top.score,
-          reasoning: top.reasoning,
-        },
-      },
-      responseId: top.responseId,
-      citations: top.citations,
-    };
-  }
-
-  return {
-    message:
-      top
-        ? `No strong bullish signal in your watchlist right now. Top of the list: **${top.ticker}** at ${top.score.toFixed(2)}.`
-        : 'Could not analyze your watchlist right now.',
-    responseId: top?.responseId,
-    citations: top?.citations,
   };
 }
 

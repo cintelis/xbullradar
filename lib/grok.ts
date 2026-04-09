@@ -34,6 +34,13 @@ export interface WebSearchTool {
 export interface GrokResponsesRequest {
   model?: string;
   input: string;
+  /**
+   * System-level instructions sent via the Responses API's first-class
+   * `instructions` field. Persists across the conversation when chained
+   * via `previous_response_id`. Use this for persona / framework prompts
+   * rather than baking them into the user `input`.
+   */
+  instructions?: string;
   previous_response_id?: string;
   temperature?: number;
   tools?: Array<XSearchTool | WebSearchTool | Record<string, any>>;
@@ -71,6 +78,9 @@ export async function callGrokResponses(
     previous_response_id: req.previous_response_id,
     temperature: req.temperature ?? 0.2,
   };
+  if (req.instructions) {
+    body.instructions = req.instructions;
+  }
   if (req.tools && req.tools.length > 0) {
     body.tools = req.tools;
   }
