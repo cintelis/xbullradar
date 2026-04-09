@@ -26,12 +26,12 @@ import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
-// Bumped to v4 when treasury yields (2Y, 10Y, 30Y) were added via the
-// new /stable/treasury-rates endpoint. The futures price tickers
-// ZNUSD/ZBUSD were removed since the actual yields are more meaningful
-// than futures positioning for casual users. Bumping the key invalidates
-// the old cache instantly instead of waiting for the 6h TTL to expire.
-const CACHE_KEY = 'xbr:markets:v4';
+// Bumped to v5 when the treasury yield set expanded from 3 points
+// (2Y/10Y/30Y) to 6 points (3M/2Y/5Y/10Y/20Y/30Y), giving a more
+// complete yield-curve picture across the tape. Bumping the key
+// invalidates the old cache instantly so the new instruments take
+// effect on next deploy without waiting for the 6h TTL to expire.
+const CACHE_KEY = 'xbr:markets:v5';
 const CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
 /**
@@ -234,8 +234,19 @@ interface FMPTreasuryRate {
 /**
  * Treasury yield curve points to surface in the ticker tape. The
  * /stable/treasury-rates endpoint returns the entire curve in one call,
- * so adding more maturities here costs us nothing. Picked the three
- * most-watched: 2Y (Fed proxy), 10Y (benchmark), 30Y (long bond).
+ * so adding more maturities here costs us nothing.
+ *
+ * Order is short-to-long maturity (3M → 30Y), which is the standard
+ * yield curve presentation order — left side of a curve chart is the
+ * short end, right side is the long end.
+ *
+ * Six points selected:
+ *   3M  — short-term Fed policy proxy (mirrors Fed Funds rate moves)
+ *   2Y  — front-end of curve, sensitive to near-term rate expectations
+ *   5Y  — belly of the curve
+ *   10Y — benchmark, drives mortgages and corporate borrowing
+ *   20Y — between 10Y and 30Y, useful for curve shape
+ *   30Y — long bond, drives long-term inflation expectations
  */
 const TREASURY_YIELD_POINTS: Array<{
   key: keyof FMPTreasuryRate;
@@ -243,8 +254,11 @@ const TREASURY_YIELD_POINTS: Array<{
   label: string;
   name: string;
 }> = [
+  { key: 'month3', symbol: 'US3M', label: '3M YIELD', name: 'US 3-Month Treasury Yield' },
   { key: 'year2', symbol: 'US2Y', label: '2Y YIELD', name: 'US 2-Year Treasury Yield' },
+  { key: 'year5', symbol: 'US5Y', label: '5Y YIELD', name: 'US 5-Year Treasury Yield' },
   { key: 'year10', symbol: 'US10Y', label: '10Y YIELD', name: 'US 10-Year Treasury Yield' },
+  { key: 'year20', symbol: 'US20Y', label: '20Y YIELD', name: 'US 20-Year Treasury Yield' },
   { key: 'year30', symbol: 'US30Y', label: '30Y YIELD', name: 'US 30-Year Treasury Yield' },
 ];
 
