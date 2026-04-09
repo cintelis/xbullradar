@@ -117,13 +117,69 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
+  /**
+   * Build the exportable message list. Combines the persisted text
+   * history with the LIVE voice transcript when a voice call is in
+   * progress, so users can export mid-call without having to End Call
+   * first. The live partial assistant reply is also included as a
+   * trailing in-progress bubble so the export reflects exactly what
+   * the user sees on screen.
+   *
+   * Returns null if there's nothing meaningful to export (just the
+   * welcome message and no voice activity).
+   */
+  function buildExportMessages(): ChatMessage[] | null {
+    const out: ChatMessage[] = [...messages];
+    if (voiceActive && voice.transcript.length > 0) {
+      // Synthesize a divider for the in-progress call so the export
+      // makes the boundary clear even though the call hasn't ended.
+      out.push({
+        id: `vs-live-${Date.now()}`,
+        role: 'system',
+        content: `Voice call (in progress) · started ${formatSessionStart(
+          new Date(Date.now() - voice.elapsed * 1000),
+        )} · ${formatSessionDuration(voice.elapsed)} so far`,
+      });
+      for (const t of voice.transcript) {
+        out.push({
+          id: `v-live-${t.id}`,
+          role: t.role === 'user' ? 'user' : 'assistant',
+          content: t.text,
+          source: 'voice',
+        });
+      }
+      if (voice.liveAssistantText.trim()) {
+        out.push({
+          id: 'v-live-partial',
+          role: 'assistant',
+          content: `${voice.liveAssistantText.trim()} … (still speaking)`,
+          source: 'voice',
+        });
+      }
+    }
+    // Filter out the welcome message — it's the only one with id
+    // 'welcome' and we never want to export it.
+    const meaningful = out.filter((m) => m.id !== 'welcome');
+    if (meaningful.length === 0) return null;
+    return meaningful;
+  }
+
   function exportChat() {
-    if (messages.length <= 1) return;
-    const text = formatChatAsText(messages);
+    const exportMessages = buildExportMessages();
+    if (!exportMessages) return;
+    const text = formatChatAsText(exportMessages);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     downloadTextFile(`xbullradar-chat-${stamp}.txt`, text);
     setExported(true);
   }
+
+  /**
+   * Whether there's anything to export. Either persisted text history
+   * (messages beyond just the welcome bubble) or a live voice transcript
+   * counts. Used to gate the export button's enabled state.
+   */
+  const hasExportableContent =
+    messages.length > 1 || voice.transcript.length > 0;
 
   // Hydrate from localStorage once on mount.
   useEffect(() => {
@@ -257,8 +313,12 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
             <button
               type="button"
               onClick={exportChat}
-              disabled={loading || messages.length <= 1}
-              title="Export conversation to text file"
+              disabled={loading || !hasExportableContent}
+              title={
+                voiceActive && voice.transcript.length > 0
+                  ? 'Export conversation (includes live voice call)'
+                  : 'Export conversation to text file'
+              }
               aria-label="Export conversation"
               className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
             >
