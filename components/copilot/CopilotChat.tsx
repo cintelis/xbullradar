@@ -6,9 +6,11 @@
 // inline by inspecting the assistant message's `ui` field.
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Trash2, ChevronRight } from 'lucide-react';
+import { Mic, Send, Trash2, ChevronRight } from 'lucide-react';
 import ActButton from './ActButton';
+import VoiceMode from './VoiceMode';
 import { Button } from '@/components/ui/button';
+import { useVoiceSession } from '@/hooks/useVoiceSession';
 import type { CopilotResponse, CopilotUiAction } from '@/types';
 
 interface CopilotChatProps {
@@ -46,6 +48,13 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   const [previousResponseId, setPreviousResponseId] = useState<string | undefined>();
   const [hydrated, setHydrated] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Voice session — when mode !== 'idle', we render <VoiceMode /> in place
+  // of the text message list. The single chat input button switches between
+  // mic-icon (empty input → click to start voice) and send-icon (text in
+  // input → click to send a text turn).
+  const voice = useVoiceSession();
+  const voiceActive = voice.mode !== 'idle' && voice.mode !== 'error';
 
   // Hydrate from localStorage once on mount.
   useEffect(() => {
@@ -182,33 +191,73 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-auto p-4">
-        {messages.map((m) => (
-          <MessageBubble key={m.id} msg={m} />
-        ))}
-        {loading && (
-          <p className="text-sm text-zinc-500">Thinking…</p>
-        )}
-      </div>
-
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          send();
-        }}
-        className="flex gap-2 border-t border-zinc-800 p-4"
-      >
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Sentiment on NVDA?"
-          disabled={loading}
-          className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
+      {voiceActive ? (
+        <VoiceMode
+          mode={voice.mode}
+          error={voice.error}
+          liveAssistantText={voice.liveAssistantText}
+          transcript={voice.transcript}
+          elapsed={voice.elapsed}
+          onDisconnect={voice.disconnect}
         />
-        <Button type="submit" variant="primary" disabled={loading || !input.trim()}>
-          <Send className="h-4 w-4" />
-        </Button>
-      </form>
+      ) : (
+        <>
+          <div ref={scrollRef} className="flex-1 space-y-4 overflow-auto p-4">
+            {messages.map((m) => (
+              <MessageBubble key={m.id} msg={m} />
+            ))}
+            {loading && <p className="text-sm text-zinc-500">Thinking…</p>}
+            {voice.error && (
+              <p className="rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">
+                Voice error: {voice.error}
+              </p>
+            )}
+          </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              // Form submit (Enter or button click) only sends text — never
+              // starts voice. This way Enter is unambiguous: it sends what
+              // you typed, or does nothing when the input is empty. Voice
+              // requires an intentional click on the mic icon, not an
+              // accidental Enter on an empty field.
+              if (input.trim()) send();
+            }}
+            className="flex gap-2 border-t border-zinc-800 p-4"
+          >
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Ask, or click the mic to talk"
+              disabled={loading}
+              className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
+            />
+            {input.trim() ? (
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={loading}
+                title="Send message"
+                aria-label="Send message"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="primary"
+                disabled={loading}
+                onClick={() => voice.connect()}
+                title="Talk to the bot"
+                aria-label="Start voice session"
+              >
+                <Mic className="h-4 w-4" />
+              </Button>
+            )}
+          </form>
+        </>
+      )}
     </div>
   );
 }
