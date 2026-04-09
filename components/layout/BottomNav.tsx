@@ -1,9 +1,9 @@
 'use client';
 
-import { LayoutDashboard, MessageSquare, Wallet } from 'lucide-react';
+import { LayoutDashboard, MessageSquare, Newspaper, Wallet } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export type MobileTab = 'dashboard' | 'portfolio' | 'chat';
+export type MobileTab = 'dashboard' | 'portfolio' | 'news' | 'chat';
 
 interface BottomNavProps {
   active: MobileTab;
@@ -13,6 +13,7 @@ interface BottomNavProps {
 const TABS: Array<{ id: MobileTab; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Radar', icon: LayoutDashboard },
   { id: 'portfolio', label: 'Portfolio', icon: Wallet },
+  { id: 'news', label: 'News', icon: Newspaper },
   { id: 'chat', label: 'Chat', icon: MessageSquare },
 ];
 

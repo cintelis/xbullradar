@@ -5,6 +5,7 @@ import { detectAlert, sendAlert } from '@/lib/alerts';
 import { refreshDailyPrices, refreshHistoricalCloses } from '@/lib/prices';
 import { refreshFundamentalSignal } from '@/lib/fundamentals';
 import { refreshMarkets } from '@/lib/markets';
+import { refreshNews } from '@/lib/news';
 
 export const runtime = 'nodejs';
 
@@ -51,6 +52,16 @@ async function runScan() {
     );
   } catch (err) {
     console.error('[daily/scan] markets cache refresh failed', err);
+  }
+
+  // Refresh the news cache so the right-sidebar NewsPanel has fresh
+  // content for morning users instead of paying the cold-cache cost
+  // themselves. Non-fatal — news is decorative when chat is showing.
+  try {
+    const news = await refreshNews();
+    console.log(`[daily/scan] refreshed news cache, ${news.articles.length} articles`);
+  } catch (err) {
+    console.error('[daily/scan] news cache refresh failed', err);
   }
 
   const userIds = await store.listUserIds();

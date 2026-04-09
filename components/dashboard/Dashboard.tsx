@@ -14,6 +14,7 @@ import TrendingStocks from '@/components/dashboard/TrendingStocks';
 import PortfolioView from '@/components/dashboard/PortfolioView';
 import MarketStrip from '@/components/dashboard/MarketStrip';
 import ExchangeClockCard from '@/components/dashboard/ExchangeClockCard';
+import NewsPanel from '@/components/dashboard/NewsPanel';
 import CopilotChat from '@/components/copilot/CopilotChat';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 
@@ -26,14 +27,18 @@ const CHAT_HIDDEN_KEY = 'xbr:chatHidden';
 export default function Dashboard({ userEmail }: DashboardProps) {
   const isDesktop = useMediaQuery('(min-width: 1024px)');
   const [mobileTab, setMobileTab] = useState<MobileTab>('dashboard');
-  const [chatHidden, setChatHidden] = useState(false);
+  // Default to hidden — chat is a tool you summon, not a permanent fixture.
+  // The right sidebar's lower section shows news instead by default. Existing
+  // users with a stored preference get their choice respected on hydration.
+  const [chatHidden, setChatHidden] = useState(true);
   const [chatHydrated, setChatHydrated] = useState(false);
 
   // Hydrate chat-hidden preference from localStorage on mount.
   useEffect(() => {
     try {
       const stored = localStorage.getItem(CHAT_HIDDEN_KEY);
-      if (stored === 'true') setChatHidden(true);
+      if (stored === 'false') setChatHidden(false);
+      // Any other value (including missing) keeps the default `true`.
     } catch {
       // ignore
     }
@@ -41,7 +46,7 @@ export default function Dashboard({ userEmail }: DashboardProps) {
   }, []);
 
   // Persist on change (post-hydration so we don't blow away the stored
-  // value with the initial false state).
+  // value with the initial state).
   useEffect(() => {
     if (!chatHydrated) return;
     try {
@@ -56,13 +61,12 @@ export default function Dashboard({ userEmail }: DashboardProps) {
       <TopBar userEmail={userEmail} />
       <MarketStrip />
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
         {/* Main content */}
         <main className="flex-1 overflow-auto p-4 lg:p-6">
           {isDesktop ? (
             // Desktop: stack all three full-width so the new signal columns
             // (Sent / Tech / Fund / Combined) have horizontal room to breathe.
-            // ExchangeClockCard lives in the right sidebar, not here.
             <div className="mx-auto max-w-6xl space-y-6">
               <SentimentRadar />
               <TrendingStocks />
@@ -80,6 +84,7 @@ export default function Dashboard({ userEmail }: DashboardProps) {
                 </div>
               )}
               {mobileTab === 'portfolio' && <PortfolioView />}
+              {mobileTab === 'news' && <NewsPanel />}
               {mobileTab === 'chat' && (
                 <div className="h-[calc(100vh-8.5rem)] overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
                   <CopilotChat />
@@ -89,16 +94,13 @@ export default function Dashboard({ userEmail }: DashboardProps) {
           )}
         </main>
 
-        {/* Right sidebar — desktop only. Holds the ExchangeClockCard at the
-            top and the CopilotChat below. Sidebar always rendered with a
-            fixed width even when chat is hidden so the clock card stays
-            anchored; the freed area below it currently shows a "show chat"
-            placeholder and will host a news panel in a follow-up commit. */}
+        {/* Right sidebar — desktop only. Top: ExchangeClockCard.
+            Bottom: NewsPanel (default) OR CopilotChat (when user has summoned). */}
         {isDesktop && (
           <aside className="hidden w-[380px] shrink-0 flex-col gap-4 overflow-y-auto border-l border-zinc-800 bg-zinc-950 p-4 lg:flex">
             <ExchangeClockCard />
             {chatHidden ? (
-              <ChatHiddenPlaceholder onShow={() => setChatHidden(false)} />
+              <NewsPanel />
             ) : (
               <div className="flex min-h-[400px] flex-1 overflow-hidden rounded-2xl border border-zinc-800">
                 <CopilotChat onHide={() => setChatHidden(true)} />
@@ -106,37 +108,26 @@ export default function Dashboard({ userEmail }: DashboardProps) {
             )}
           </aside>
         )}
+
+        {/* Floating "Ask AI" button — desktop only, only when chat is hidden.
+            Standard SaaS chat widget pattern (Intercom, Drift, ChatGPT widget).
+            Provides a single discoverable entry point for new users without
+            cluttering the layout. */}
+        {isDesktop && chatHidden && (
+          <button
+            type="button"
+            onClick={() => setChatHidden(false)}
+            title="Ask the xBullRadar AI assistant"
+            aria-label="Open chat"
+            className="absolute bottom-6 right-[404px] z-30 flex h-12 w-12 items-center justify-center rounded-full bg-green-600 text-white shadow-lg shadow-green-900/40 transition hover:scale-105 hover:bg-green-500 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 focus:ring-offset-zinc-950"
+          >
+            <MessageSquare className="h-5 w-5" />
+          </button>
+        )}
       </div>
 
       {/* Mobile bottom nav */}
       {!isDesktop && <BottomNav active={mobileTab} onChange={setMobileTab} />}
-    </div>
-  );
-}
-
-/**
- * Placeholder shown in the right sidebar when the user has hidden the
- * chat panel. Currently a simple "show chat" button; in the next commit
- * this will be replaced by a financial news feed (FMP /stable/fmp-articles)
- * so the freed space is filled with useful content instead of empty UI.
- */
-function ChatHiddenPlaceholder({ onShow }: { onShow: () => void }) {
-  return (
-    <div className="flex min-h-[400px] flex-1 flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 p-8 text-center">
-      <MessageSquare className="h-8 w-8 text-zinc-700" />
-      <div>
-        <p className="text-sm font-medium text-zinc-300">Chat is hidden</p>
-        <p className="mt-1 text-xs text-zinc-500">
-          A news feed will live here in a future update.
-        </p>
-      </div>
-      <button
-        type="button"
-        onClick={onShow}
-        className="rounded-md bg-green-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-green-500"
-      >
-        Show chat
-      </button>
     </div>
   );
 }
