@@ -30,11 +30,13 @@ import { getEarnings, getEarningsBeatRate } from './earnings';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
 const CACHE_TTL_SECONDS = 48 * 60 * 60; // 48 hours
-// Bumped to v4 when the growth signal switched from a degenerate
-// "EPS positive on TTM" proxy to real YoY revenue + EPS growth
-// computed from /stable/income-statement annual records. The cached
-// signal shape now includes revenueGrowth and epsGrowth fields.
-const FUND_KEY = (ticker: string) => `xbr:fundamentals:v4:${ticker}`;
+// Bumped to v5 when sector-relative thresholds replaced absolute
+// thresholds in valuation/profitability/health signals. The cached
+// signal computation now depends on sector data, so old v4 cache
+// entries (computed against absolute thresholds) would be misleading.
+const FUND_KEY = (ticker: string) => `xbr:fundamentals:v5:${ticker}`;
+const PROFILE_KEY = (ticker: string) => `xbr:profile:v1:${ticker}`;
+const PROFILE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days — sectors rarely change
 
 export interface FundamentalIndicators {
   valuation: Signal;     // P/E, P/B, P/S — is the stock cheap or expensive?
@@ -132,6 +134,66 @@ interface YoyGrowth {
 }
 
 /**
+ * Sector baseline metrics for sector-relative threshold comparisons.
+ * Replaces absolute "P/E < 15 = bullish" thresholds which incorrectly
+ * judged tech stocks (where 30+ is normal) and utilities the same way.
+ *
+ * Values are rough sector medians compiled from public market data.
+ * Used as denominators in the signal functions:
+ *   "cheap" = stock metric < baseline × 0.85  (15% below sector avg)
+ *   "expensive" = stock metric > baseline × 1.20 (20% above)
+ *   The asymmetric band biases toward NEUTRAL for moderately overvalued
+ *   stocks but flags clearly undervalued ones as BUY.
+ *
+ * Sector strings match what FMP /stable/profile returns in the `sector`
+ * field. Falls back to FALLBACK_BASELINE for any sector not in the table
+ * (rare — covers all 11 GICS sectors).
+ */
+interface SectorBaseline {
+  peRatio: number;
+  priceToBook: number;
+  priceToSales: number;
+  /** Decimal, e.g., 0.15 = 15% ROE */
+  roe: number;
+  /** Decimal, e.g., 0.10 = 10% net margin */
+  netMargin: number;
+  debtToEquity: number;
+}
+
+const SECTOR_BASELINES: Record<string, SectorBaseline> = {
+  Technology:               { peRatio: 28, priceToBook: 6.0, priceToSales: 6.0, roe: 0.18, netMargin: 0.18, debtToEquity: 0.4 },
+  Healthcare:               { peRatio: 22, priceToBook: 4.0, priceToSales: 3.0, roe: 0.14, netMargin: 0.10, debtToEquity: 0.6 },
+  'Financial Services':     { peRatio: 13, priceToBook: 1.5, priceToSales: 3.0, roe: 0.11, netMargin: 0.18, debtToEquity: 1.5 },
+  'Consumer Defensive':     { peRatio: 22, priceToBook: 4.0, priceToSales: 1.5, roe: 0.18, netMargin: 0.08, debtToEquity: 0.8 },
+  'Consumer Cyclical':      { peRatio: 20, priceToBook: 4.0, priceToSales: 1.5, roe: 0.15, netMargin: 0.06, debtToEquity: 0.8 },
+  Industrials:              { peRatio: 20, priceToBook: 3.5, priceToSales: 1.8, roe: 0.16, netMargin: 0.08, debtToEquity: 0.7 },
+  Energy:                   { peRatio: 13, priceToBook: 2.0, priceToSales: 1.2, roe: 0.13, netMargin: 0.10, debtToEquity: 0.5 },
+  Utilities:                { peRatio: 18, priceToBook: 2.0, priceToSales: 2.0, roe: 0.10, netMargin: 0.10, debtToEquity: 1.5 },
+  'Real Estate':            { peRatio: 28, priceToBook: 2.5, priceToSales: 7.0, roe: 0.07, netMargin: 0.20, debtToEquity: 1.0 },
+  'Communication Services': { peRatio: 20, priceToBook: 3.0, priceToSales: 2.5, roe: 0.13, netMargin: 0.13, debtToEquity: 0.7 },
+  'Basic Materials':        { peRatio: 16, priceToBook: 2.5, priceToSales: 1.5, roe: 0.13, netMargin: 0.08, debtToEquity: 0.5 },
+};
+
+const FALLBACK_BASELINE: SectorBaseline = {
+  peRatio: 20,
+  priceToBook: 3.0,
+  priceToSales: 2.5,
+  roe: 0.13,
+  netMargin: 0.10,
+  debtToEquity: 0.7,
+};
+
+const CHEAP_MULTIPLIER = 0.85; // 15% below sector avg = "cheap"
+const EXPENSIVE_MULTIPLIER = 1.20; // 20% above sector avg = "expensive"
+
+interface FMPProfileRaw {
+  symbol?: string;
+  sector?: string;
+  industry?: string;
+  companyName?: string;
+}
+
+/**
  * Detect FMP error responses that come back as 200 OK with an error body.
  * Both "Legacy Endpoint" and "Premium Query Parameter" errors use this
  * pattern instead of HTTP status codes. Returns true if the body looks
@@ -213,6 +275,84 @@ async function fetchFundamentalsRaw(ticker: string): Promise<{
   return { metrics, ratios: ratios ?? {}, growth };
 }
 
+// ─── Profile (sector classification) ────────────────────────────────────────
+
+interface CachedProfile {
+  ticker: string;
+  sector: string | null;
+  industry: string | null;
+  companyName: string | null;
+  fetchedAt: string;
+}
+
+/**
+ * Fetch the FMP profile for a ticker (sector + industry classification).
+ * Cached separately from the main fundamentals at 7-day TTL since
+ * sectors essentially never change for an established company.
+ *
+ * Returns null if FMP doesn't have a profile (e.g., ETFs, recent IPOs,
+ * non-corporate tickers like indexes). Throws only on real network errors.
+ */
+async function fetchProfile(ticker: string): Promise<CachedProfile | null> {
+  const upper = ticker.toUpperCase();
+  const redis = getRedis();
+
+  if (redis) {
+    const cached = await redis.get<CachedProfile | string>(PROFILE_KEY(upper));
+    const parsed = parseCachedProfile(cached);
+    if (parsed) return parsed;
+  }
+
+  const apiKey = encodeURIComponent(getApiKey());
+  const url = `${FMP_API_BASE}/profile?symbol=${encodeURIComponent(upper)}&apikey=${apiKey}`;
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) return null;
+  const json = (await res.json()) as unknown;
+  if (isFMPErrorBody(json)) return null;
+  if (!Array.isArray(json) || json.length === 0) return null;
+
+  const raw = json[0] as FMPProfileRaw;
+  const fresh: CachedProfile = {
+    ticker: upper,
+    sector: raw.sector?.trim() || null,
+    industry: raw.industry?.trim() || null,
+    companyName: raw.companyName?.trim() || null,
+    fetchedAt: new Date().toISOString(),
+  };
+
+  if (redis) {
+    await redis.set(PROFILE_KEY(upper), JSON.stringify(fresh), { ex: PROFILE_TTL_SECONDS });
+  }
+  return fresh;
+}
+
+function parseCachedProfile(raw: unknown): CachedProfile | null {
+  if (raw == null) return null;
+  if (typeof raw === 'object') return raw as CachedProfile;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as CachedProfile;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Get the sector baseline for a given sector string. Returns the
+ * fallback baseline if the sector isn't in the table (rare — covers
+ * all 11 GICS sectors that FMP returns) or if sector is null.
+ */
+function getSectorBaseline(sector: string | null): SectorBaseline {
+  if (!sector) return FALLBACK_BASELINE;
+  return SECTOR_BASELINES[sector] ?? FALLBACK_BASELINE;
+}
+
 /**
  * Parse two consecutive annual income statements into YoY growth.
  * Records are returned newest-first by FMP. Falls back gracefully to
@@ -267,15 +407,20 @@ function parseGrowthFromIncome(json: unknown): YoyGrowth {
 // ─── Per-bucket signal classification ───────────────────────────────────────
 
 /**
- * Valuation: lower P/E and P/B = potentially undervalued. Uses absolute
- * thresholds for MVP — not sector-aware. A 30 P/E is normal for tech and
- * alarming for autos, but we ignore that nuance until we have sector
- * baseline data. Disclaimer covers this in the UI.
+ * Valuation: P/E, P/B, P/S compared against the stock's SECTOR median
+ * rather than a hardcoded universal threshold. A 30 P/E is normal for
+ * tech (sector median ~28, so 30 is neutral) but expensive for autos
+ * (sector median ~16, so 30 is SELL).
+ *
+ * Sub-vote across the 3 metrics:
+ *   metric < baseline × 0.85 → bullish (15% below sector median)
+ *   metric > baseline × 1.20 → bearish (20% above sector median)
+ *   else                     → neutral
  *
  * Note: with the FMP v3→stable migration, P/E, P/B, and P/S all live in
  * the ratios-ttm endpoint now (they used to be in key-metrics-ttm).
  */
-function valuationSignal(ratios: FMPRatiosTTM): Signal {
+function valuationSignal(ratios: FMPRatiosTTM, baseline: SectorBaseline): Signal {
   const pe = ratios.priceToEarningsRatioTTM ?? null;
   const pb = ratios.priceToBookRatioTTM ?? null;
   const ps = ratios.priceToSalesRatioTTM ?? null;
@@ -286,18 +431,18 @@ function valuationSignal(ratios: FMPRatiosTTM): Signal {
 
   if (pe != null && pe > 0) {
     counted += 1;
-    if (pe < 15) bullish += 1;
-    else if (pe > 30) bearish += 1;
+    if (pe < baseline.peRatio * CHEAP_MULTIPLIER) bullish += 1;
+    else if (pe > baseline.peRatio * EXPENSIVE_MULTIPLIER) bearish += 1;
   }
   if (pb != null && pb > 0) {
     counted += 1;
-    if (pb < 1.5) bullish += 1;
-    else if (pb > 5) bearish += 1;
+    if (pb < baseline.priceToBook * CHEAP_MULTIPLIER) bullish += 1;
+    else if (pb > baseline.priceToBook * EXPENSIVE_MULTIPLIER) bearish += 1;
   }
   if (ps != null && ps > 0) {
     counted += 1;
-    if (ps < 2) bullish += 1;
-    else if (ps > 10) bearish += 1;
+    if (ps < baseline.priceToSales * CHEAP_MULTIPLIER) bullish += 1;
+    else if (ps > baseline.priceToSales * EXPENSIVE_MULTIPLIER) bearish += 1;
   }
 
   if (counted === 0) return 'NEUTRAL';
@@ -307,13 +452,18 @@ function valuationSignal(ratios: FMPRatiosTTM): Signal {
 }
 
 /**
- * Profitability: ROE > 15% is generally great; net margin > 10% is
- * generally healthy. Negative either is a warning sign.
+ * Profitability: ROE and net margin compared against sector baselines.
+ * Tech ROE of 18% is "average" against tech sector median of 18%, but
+ * the same 18% ROE for a utility (sector median ~10%) is excellent.
  *
  * ROE is now in key-metrics-ttm under returnOnEquityTTM. Net margin
  * stayed in ratios-ttm.
  */
-function profitabilitySignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): Signal {
+function profitabilitySignal(
+  metrics: FMPKeyMetricsTTM,
+  ratios: FMPRatiosTTM,
+  baseline: SectorBaseline,
+): Signal {
   const roe = metrics.returnOnEquityTTM ?? null;
   const netMargin = ratios.netProfitMarginTTM ?? null;
 
@@ -323,13 +473,15 @@ function profitabilitySignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): S
 
   if (roe != null) {
     counted += 1;
-    if (roe > 0.15) bullish += 1;
-    else if (roe < 0) bearish += 1;
+    if (roe < 0) bearish += 1; // negative ROE is always bad regardless of sector
+    else if (roe > baseline.roe * EXPENSIVE_MULTIPLIER) bullish += 1; // beating sector by 20%
+    else if (roe < baseline.roe * CHEAP_MULTIPLIER) bearish += 1; // 15% below sector median
   }
   if (netMargin != null) {
     counted += 1;
-    if (netMargin > 0.1) bullish += 1;
-    else if (netMargin < 0) bearish += 1;
+    if (netMargin < 0) bearish += 1; // unprofitable always bad
+    else if (netMargin > baseline.netMargin * EXPENSIVE_MULTIPLIER) bullish += 1;
+    else if (netMargin < baseline.netMargin * CHEAP_MULTIPLIER) bearish += 1;
   }
 
   if (counted === 0) return 'NEUTRAL';
@@ -377,15 +529,24 @@ function growthSignal(growth: YoyGrowth): Signal {
 }
 
 /**
- * Financial health: low debt/equity, positive FCF yield, current ratio
- * > 1.5. Conservative balance sheet wins.
+ * Financial health: debt-to-equity vs sector baseline, current ratio,
+ * positive FCF yield. Utilities and financials carry more debt as a
+ * structural feature (regulated cash flows), so absolute D/E thresholds
+ * misjudge them. Sector-relative comparison fixes this.
  *
  * FCF check uses freeCashFlowYieldTTM > 0 instead of per-share value
  * because the new stable API doesn't expose freeCashFlowPerShareTTM.
- * Yield > 0 is mathematically equivalent to "FCF positive" so the
- * signal logic is unchanged.
+ * Yield > 0 is mathematically equivalent to "FCF positive".
+ *
+ * Current ratio thresholds stay absolute (1.5 / 1.0) since the
+ * "can the company cover short-term obligations" question doesn't
+ * vary as much by sector — 1.5x is healthy across the board.
  */
-function healthSignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): Signal {
+function healthSignal(
+  metrics: FMPKeyMetricsTTM,
+  ratios: FMPRatiosTTM,
+  baseline: SectorBaseline,
+): Signal {
   const dToE = ratios.debtToEquityRatioTTM ?? null;
   const currentRatio = metrics.currentRatioTTM ?? null;
   const fcfYield = metrics.freeCashFlowYieldTTM ?? null;
@@ -396,8 +557,8 @@ function healthSignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): Signal {
 
   if (dToE != null && dToE >= 0) {
     counted += 1;
-    if (dToE < 0.5) bullish += 1;
-    else if (dToE > 2) bearish += 1;
+    if (dToE < baseline.debtToEquity * CHEAP_MULTIPLIER) bullish += 1;
+    else if (dToE > baseline.debtToEquity * EXPENSIVE_MULTIPLIER) bearish += 1;
   }
   if (currentRatio != null && currentRatio > 0) {
     counted += 1;
@@ -443,12 +604,13 @@ function aggregate(
   ratios: FMPRatiosTTM,
   growth: YoyGrowth,
   beatRate: number | null,
+  baseline: SectorBaseline,
 ): FundamentalSignal {
   const indicators: FundamentalIndicators = {
-    valuation: valuationSignal(ratios),
-    profitability: profitabilitySignal(metrics, ratios),
+    valuation: valuationSignal(ratios, baseline),
+    profitability: profitabilitySignal(metrics, ratios, baseline),
     growth: growthSignal(growth),
-    health: healthSignal(metrics, ratios),
+    health: healthSignal(metrics, ratios, baseline),
     consistency: consistencySignal(beatRate),
   };
 
@@ -538,13 +700,18 @@ export async function getFundamentalSignal(ticker: string): Promise<FundamentalS
     if (parsed) return parsed;
   }
 
-  // Fetch fundamentals + earnings in parallel. Earnings is non-fatal —
-  // ETFs and some tickers don't have earnings data, in which case the
-  // beat rate is null and the consistency bucket votes NEUTRAL.
-  const [raw, earningsCache] = await Promise.all([
+  // Fetch fundamentals + earnings + profile in parallel. Earnings and
+  // profile are non-fatal — ETFs and some tickers don't have them, in
+  // which case the consistency bucket votes NEUTRAL and the sector
+  // baseline falls back to FALLBACK_BASELINE.
+  const [raw, earningsCache, profile] = await Promise.all([
     fetchFundamentalsRaw(upper),
     getEarnings(upper).catch((err) => {
       console.warn(`[fundamentals] earnings fetch failed for ${upper}:`, err);
+      return null;
+    }),
+    fetchProfile(upper).catch((err) => {
+      console.warn(`[fundamentals] profile fetch failed for ${upper}:`, err);
       return null;
     }),
   ]);
@@ -552,7 +719,8 @@ export async function getFundamentalSignal(ticker: string): Promise<FundamentalS
   if (!raw) return null;
 
   const beatRate = getEarningsBeatRate(earningsCache);
-  const fresh = aggregate(raw.metrics, raw.ratios, raw.growth, beatRate);
+  const baseline = getSectorBaseline(profile?.sector ?? null);
+  const fresh = aggregate(raw.metrics, raw.ratios, raw.growth, beatRate, baseline);
 
   if (redis) {
     await redis.set(FUND_KEY(upper), JSON.stringify(fresh), { ex: CACHE_TTL_SECONDS });
