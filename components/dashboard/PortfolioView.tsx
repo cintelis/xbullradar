@@ -25,6 +25,7 @@ import {
   type EarningsBeatRecord,
   type NextEarnings,
 } from '@/components/dashboard/EarningsBadge';
+import { ERPBadge } from '@/components/dashboard/ERPBadge';
 import type { EnrichedPortfolioHolding } from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
@@ -51,7 +52,10 @@ interface TechnicalApiResponse {
 interface FundamentalApiResponse {
   results: Array<{
     ticker: string;
-    signal: { signal: Signal } | null;
+    signal: {
+      signal: Signal;
+      metrics?: { equityRiskPremium?: number | null };
+    } | null;
   }>;
 }
 
@@ -74,6 +78,7 @@ interface RowState {
   holding: EnrichedPortfolioHolding;
   technicalSignal: Signal | null;
   fundamentalSignal: Signal | null;
+  equityRiskPremium: number | null;
   combined: CombinedSignal | null;
   nextEarnings: NextEarnings | null;
   recentBeats: EarningsBeatRecord[];
@@ -99,6 +104,7 @@ export default function PortfolioView() {
     const tickers = (portfolio.holdings ?? []).map((h) => h.ticker.toUpperCase());
     const technicalMap = new Map<string, Signal | null>();
     const fundamentalMap = new Map<string, Signal | null>();
+    const erpMap = new Map<string, number | null>();
     const earningsMap = new Map<string, { next: NextEarnings | null; recentBeats: EarningsBeatRecord[] }>();
 
     if (tickers.length > 0) {
@@ -118,7 +124,9 @@ export default function PortfolioView() {
       }
       if (fundRes.status === 'fulfilled') {
         for (const r of fundRes.value.results ?? []) {
-          fundamentalMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+          const upper = r.ticker.toUpperCase();
+          fundamentalMap.set(upper, r.signal?.signal ?? null);
+          erpMap.set(upper, r.signal?.metrics?.equityRiskPremium ?? null);
         }
       } else {
         console.warn('[portfolio] fundamentals fetch failed', fundRes.reason);
@@ -146,6 +154,7 @@ export default function PortfolioView() {
       const upper = h.ticker.toUpperCase();
       const tech = technicalMap.get(upper) ?? null;
       const fund = fundamentalMap.get(upper) ?? null;
+      const erp = erpMap.get(upper) ?? null;
       const earnings = earningsMap.get(upper);
       const sentSignal = h.sentimentScore !== 0 ? sentimentToSignal(h.sentimentScore) : null;
       const combined = combineSignals(sentSignal, tech, fund);
@@ -153,6 +162,7 @@ export default function PortfolioView() {
         holding: h,
         technicalSignal: tech,
         fundamentalSignal: fund,
+        equityRiskPremium: erp,
         combined,
         nextEarnings: earnings?.next ?? null,
         recentBeats: earnings?.recentBeats ?? [],
@@ -384,6 +394,7 @@ export default function PortfolioView() {
               <col className="w-24" /> {/* Sent */}
               <col className="w-24" /> {/* Tech */}
               <col className="w-24" /> {/* Fund */}
+              <col className="w-32" /> {/* ERP */}
               <col className="w-32" /> {/* Combined */}
               <col className="w-24" /> {/* Earnings */}
               <col className="w-10" /> {/* × */}
@@ -398,6 +409,7 @@ export default function PortfolioView() {
                 <th className="pb-2 px-2 text-right">Sent</th>
                 <th className="pb-2 px-2 text-right">Tech</th>
                 <th className="pb-2 px-2 text-right">Fund</th>
+                <th className="pb-2 px-2 text-right">ERP</th>
                 <th className="pb-2 px-2 text-right">Combined</th>
                 <th className="pb-2 px-2 text-right">Earnings</th>
                 <th className="pb-2"></th>
@@ -461,6 +473,9 @@ export default function PortfolioView() {
                             : 'No fundamentals data yet'
                         }
                       />
+                    </td>
+                    <td className="py-2 px-2 text-right">
+                      <ERPBadge erp={r.equityRiskPremium} />
                     </td>
                     <td className="py-2 px-2 text-right">
                       <CombinedBadge signal={r.combined} />
@@ -544,6 +559,10 @@ export default function PortfolioView() {
                         Fund
                       </span>
                       <SignalBadge signal={r.fundamentalSignal} />
+                      <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-600">
+                        ERP
+                      </span>
+                      <ERPBadge erp={r.equityRiskPremium} />
                     </div>
                     <button
                       type="button"

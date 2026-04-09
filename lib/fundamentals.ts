@@ -27,14 +27,16 @@ import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 import type { Signal } from './technicals';
 import { getEarnings, getEarningsBeatRate } from './earnings';
+import { get10YYield } from './markets';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
 const CACHE_TTL_SECONDS = 48 * 60 * 60; // 48 hours
-// Bumped to v5 when sector-relative thresholds replaced absolute
-// thresholds in valuation/profitability/health signals. The cached
-// signal computation now depends on sector data, so old v4 cache
-// entries (computed against absolute thresholds) would be misleading.
-const FUND_KEY = (ticker: string) => `xbr:fundamentals:v5:${ticker}`;
+// Bumped to v6 when the Equity Risk Premium (ERP) field was added to
+// the fundamentals metrics. ERP = (1/PE) * 100 - 10Y_yield, computed
+// per-ticker server-side using the cached 10Y treasury yield from
+// lib/markets.ts. The cached signal shape changed so old v5 entries
+// would be missing the equityRiskPremium field.
+const FUND_KEY = (ticker: string) => `xbr:fundamentals:v6:${ticker}`;
 const PROFILE_KEY = (ticker: string) => `xbr:profile:v1:${ticker}`;
 const PROFILE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days — sectors rarely change
 
@@ -64,6 +66,17 @@ export interface FundamentalSignal {
     freeCashFlow: number | null;
     /** Fraction of last 4 quarters that beat consensus, 0..1 */
     earningsBeatRate: number | null;
+    /**
+     * Equity Risk Premium = earnings yield − 10Y treasury yield, in
+     * percentage points. Positive ERP means stock is "cheap vs bonds"
+     * (offers more yield than the risk-free alternative). Negative or
+     * very low ERP means the stock yields LESS than treasuries —
+     * expensive vs the risk-free rate.
+     *
+     * Null if peRatio is missing/non-positive or the 10Y yield isn't
+     * available from the markets cache.
+     */
+    equityRiskPremium: number | null;
   };
   /** ISO timestamp of when this data was fetched from FMP. */
   fetchedAt: string;
@@ -599,12 +612,41 @@ function consistencySignal(beatRate: number | null): Signal {
   return 'NEUTRAL';
 }
 
+/**
+ * Compute Equity Risk Premium (ERP) for a stock vs the risk-free rate.
+ *
+ *   ERP = earnings_yield − 10Y_yield  (both in percentage points)
+ *
+ * Earnings yield = 1 / P/E. So a stock with P/E of 20 has a 5%
+ * earnings yield. If the 10Y treasury is at 4.29%, ERP = 0.71% — the
+ * stock barely compensates for the extra risk vs holding bonds.
+ *
+ * Returns null if:
+ *   - P/E is missing or non-positive (can't compute earnings yield)
+ *   - 10Y yield is unavailable from the markets cache
+ *
+ * Used by the UI to render the "cheap/fair/rich vs bonds" badge per
+ * ticker. NOT used in the fundamentals signal aggregation — it's a
+ * separate informational badge that the user reads alongside the
+ * Combined signal.
+ */
+function computeEquityRiskPremium(
+  peRatio: number | null,
+  tenYearYield: number | null,
+): number | null {
+  if (peRatio == null || peRatio <= 0) return null;
+  if (tenYearYield == null) return null;
+  const earningsYield = (1 / peRatio) * 100; // convert ratio to percentage points
+  return earningsYield - tenYearYield;
+}
+
 function aggregate(
   metrics: FMPKeyMetricsTTM,
   ratios: FMPRatiosTTM,
   growth: YoyGrowth,
   beatRate: number | null,
   baseline: SectorBaseline,
+  tenYearYield: number | null,
 ): FundamentalSignal {
   const indicators: FundamentalIndicators = {
     valuation: valuationSignal(ratios, baseline),
@@ -636,12 +678,15 @@ function aggregate(
     confidence = neutrals / 5;
   }
 
+  const peForErp = ratios.priceToEarningsRatioTTM ?? null;
+  const equityRiskPremium = computeEquityRiskPremium(peForErp, tenYearYield);
+
   return {
     signal,
     confidence,
     indicators,
     metrics: {
-      peRatio: ratios.priceToEarningsRatioTTM ?? null,
+      peRatio: peForErp,
       priceToBook: ratios.priceToBookRatioTTM ?? null,
       priceToSales: ratios.priceToSalesRatioTTM ?? null,
       roe: metrics.returnOnEquityTTM ?? null,
@@ -651,6 +696,7 @@ function aggregate(
       currentRatio: metrics.currentRatioTTM ?? null,
       freeCashFlow: metrics.freeCashFlowYieldTTM ?? null, // yield, not per-share
       earningsBeatRate: beatRate,
+      equityRiskPremium,
     },
     fetchedAt: new Date().toISOString(),
   };
@@ -700,11 +746,12 @@ export async function getFundamentalSignal(ticker: string): Promise<FundamentalS
     if (parsed) return parsed;
   }
 
-  // Fetch fundamentals + earnings + profile in parallel. Earnings and
-  // profile are non-fatal — ETFs and some tickers don't have them, in
-  // which case the consistency bucket votes NEUTRAL and the sector
-  // baseline falls back to FALLBACK_BASELINE.
-  const [raw, earningsCache, profile] = await Promise.all([
+  // Fetch fundamentals + earnings + profile + 10Y yield in parallel.
+  // All three secondary sources are non-fatal:
+  //   - Earnings: ETFs/recent IPOs don't have data → consistency NEUTRAL
+  //   - Profile: same → falls back to FALLBACK_BASELINE for sector
+  //   - 10Y yield: markets cache empty → ERP becomes null, badge hidden
+  const [raw, earningsCache, profile, tenYearYield] = await Promise.all([
     fetchFundamentalsRaw(upper),
     getEarnings(upper).catch((err) => {
       console.warn(`[fundamentals] earnings fetch failed for ${upper}:`, err);
@@ -714,13 +761,17 @@ export async function getFundamentalSignal(ticker: string): Promise<FundamentalS
       console.warn(`[fundamentals] profile fetch failed for ${upper}:`, err);
       return null;
     }),
+    get10YYield().catch((err) => {
+      console.warn(`[fundamentals] 10Y yield fetch failed for ${upper}:`, err);
+      return null;
+    }),
   ]);
 
   if (!raw) return null;
 
   const beatRate = getEarningsBeatRate(earningsCache);
   const baseline = getSectorBaseline(profile?.sector ?? null);
-  const fresh = aggregate(raw.metrics, raw.ratios, raw.growth, beatRate, baseline);
+  const fresh = aggregate(raw.metrics, raw.ratios, raw.growth, beatRate, baseline, tenYearYield);
 
   if (redis) {
     await redis.set(FUND_KEY(upper), JSON.stringify(fresh), { ex: CACHE_TTL_SECONDS });

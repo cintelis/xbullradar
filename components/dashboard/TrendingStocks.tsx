@@ -15,6 +15,7 @@ import {
   type EarningsBeatRecord,
   type NextEarnings,
 } from '@/components/dashboard/EarningsBadge';
+import { ERPBadge } from '@/components/dashboard/ERPBadge';
 import type { StockSentiment } from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
@@ -30,7 +31,10 @@ interface TechnicalApiResponse {
 interface FundamentalApiResponse {
   results: Array<{
     ticker: string;
-    signal: { signal: Signal } | null;
+    signal: {
+      signal: Signal;
+      metrics?: { equityRiskPremium?: number | null };
+    } | null;
   }>;
 }
 
@@ -46,6 +50,7 @@ interface RowState {
   sentiment: StockSentiment;
   technicalSignal: Signal | null;
   fundamentalSignal: Signal | null;
+  equityRiskPremium: number | null;
   combined: CombinedSignal | null;
   nextEarnings: NextEarnings | null;
   recentBeats: EarningsBeatRecord[];
@@ -67,6 +72,7 @@ export default function TrendingStocks() {
       sentiments: StockSentiment[],
       technicalMap: Map<string, Signal | null>,
       fundamentalMap: Map<string, Signal | null>,
+      erpMap: Map<string, number | null>,
       earningsMap: Map<string, { next: NextEarnings | null; recentBeats: EarningsBeatRecord[] }>,
     ): RowState[] => {
       // Sort by absolute sentiment score so the most "interesting" movement
@@ -78,12 +84,14 @@ export default function TrendingStocks() {
         const upper = s.ticker.toUpperCase();
         const tech = technicalMap.get(upper) ?? null;
         const fund = fundamentalMap.get(upper) ?? null;
+        const erp = erpMap.get(upper) ?? null;
         const earnings = earningsMap.get(upper);
         const sentSignal = s.score !== 0 ? sentimentToSignal(s.score) : null;
         return {
           sentiment: s,
           technicalSignal: tech,
           fundamentalSignal: fund,
+          equityRiskPremium: erp,
           combined: combineSignals(sentSignal, tech, fund),
           nextEarnings: earnings?.next ?? null,
           recentBeats: earnings?.recentBeats ?? [],
@@ -94,12 +102,15 @@ export default function TrendingStocks() {
   );
 
   // Fetch /api/technicals + /api/fundamentals + /api/earnings in parallel
-  // for the given ticker set, returning three maps the merge step uses.
+  // for the given ticker set. Returns four maps: tech signal, fund signal,
+  // ERP value (extracted from the fundamentals response.metrics), and
+  // earnings calendar/beat history.
   const fetchSignals = useCallback(async (tickers: string[]) => {
     const techMap = new Map<string, Signal | null>();
     const fundMap = new Map<string, Signal | null>();
+    const erpMap = new Map<string, number | null>();
     const earningsMap = new Map<string, { next: NextEarnings | null; recentBeats: EarningsBeatRecord[] }>();
-    if (tickers.length === 0) return { techMap, fundMap, earningsMap };
+    if (tickers.length === 0) return { techMap, fundMap, erpMap, earningsMap };
     const tickersParam = tickers.join(',');
     const [techRes, fundRes, earningsRes] = await Promise.allSettled([
       fetch(`/api/technicals?tickers=${tickersParam}`).then((r) => r.json() as Promise<TechnicalApiResponse>),
@@ -115,7 +126,9 @@ export default function TrendingStocks() {
     }
     if (fundRes.status === 'fulfilled') {
       for (const r of fundRes.value.results ?? []) {
-        fundMap.set(r.ticker.toUpperCase(), r.signal?.signal ?? null);
+        const upper = r.ticker.toUpperCase();
+        fundMap.set(upper, r.signal?.signal ?? null);
+        erpMap.set(upper, r.signal?.metrics?.equityRiskPremium ?? null);
       }
     } else {
       console.warn('[trending] fundamentals fetch failed', fundRes.reason);
@@ -130,7 +143,7 @@ export default function TrendingStocks() {
     } else {
       console.warn('[trending] earnings fetch failed', earningsRes.reason);
     }
-    return { techMap, fundMap, earningsMap };
+    return { techMap, fundMap, erpMap, earningsMap };
   }, []);
 
   // Initial load: cheap GET reads last-known scores from disk (no Grok call).
@@ -141,8 +154,8 @@ export default function TrendingStocks() {
         const data = await res.json();
         const sentiments: StockSentiment[] = data.results ?? [];
         const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-        const { techMap, fundMap, earningsMap } = await fetchSignals(tickers);
-        setRows(mergeRows(sentiments, techMap, fundMap, earningsMap));
+        const { techMap, fundMap, erpMap, earningsMap } = await fetchSignals(tickers);
+        setRows(mergeRows(sentiments, techMap, fundMap, erpMap, earningsMap));
         if (sentiments.some((r) => r.score !== 0)) {
           setLastUpdated(new Date());
         }
@@ -169,8 +182,8 @@ export default function TrendingStocks() {
       }
       const sentiments: StockSentiment[] = data.results ?? [];
       const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-      const { techMap, fundMap, earningsMap } = await fetchSignals(tickers);
-      setRows(mergeRows(sentiments, techMap, fundMap, earningsMap));
+      const { techMap, fundMap, erpMap, earningsMap } = await fetchSignals(tickers);
+      setRows(mergeRows(sentiments, techMap, fundMap, erpMap, earningsMap));
       setLastUpdated(new Date());
     } catch (err) {
       setError((err as Error).message);
@@ -189,8 +202,8 @@ export default function TrendingStocks() {
     }
     const sentiments: StockSentiment[] = data.results ?? [];
     const tickers = sentiments.map((s) => s.ticker.toUpperCase());
-    const { techMap, fundMap, earningsMap } = await fetchSignals(tickers);
-    setRows(mergeRows(sentiments, techMap, fundMap, earningsMap));
+    const { techMap, fundMap, erpMap, earningsMap } = await fetchSignals(tickers);
+    setRows(mergeRows(sentiments, techMap, fundMap, erpMap, earningsMap));
   }
 
   // Replace the entire watchlist server-side, then refetch the table data.
@@ -355,6 +368,7 @@ export default function TrendingStocks() {
               <col className="w-24" /> {/* Sent */}
               <col className="w-24" /> {/* Tech */}
               <col className="w-24" /> {/* Fund */}
+              <col className="w-32" /> {/* ERP */}
               <col className="w-32" /> {/* Combined */}
               <col className="w-24" /> {/* Earnings */}
               <col className="w-10" /> {/* × */}
@@ -366,6 +380,7 @@ export default function TrendingStocks() {
                 <th className="pb-2 px-2 text-right">Sent</th>
                 <th className="pb-2 px-2 text-right">Tech</th>
                 <th className="pb-2 px-2 text-right">Fund</th>
+                <th className="pb-2 px-2 text-right">ERP</th>
                 <th className="pb-2 px-2 text-right">Combined</th>
                 <th className="pb-2 px-2 text-right">Earnings</th>
                 <th className="pb-2"></th>
@@ -407,6 +422,9 @@ export default function TrendingStocks() {
                           : 'No fundamentals data yet'
                       }
                     />
+                  </td>
+                  <td className="py-2 px-2 text-right">
+                    <ERPBadge erp={r.equityRiskPremium} />
                   </td>
                   <td className="py-2 px-2 text-right">
                     <CombinedBadge signal={r.combined} />
@@ -469,6 +487,10 @@ export default function TrendingStocks() {
                         Fund
                       </span>
                       <SignalBadge signal={r.fundamentalSignal} />
+                      <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-600">
+                        ERP
+                      </span>
+                      <ERPBadge erp={r.equityRiskPremium} />
                     </div>
                     <button
                       type="button"

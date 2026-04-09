@@ -461,3 +461,25 @@ export async function refreshMarkets(): Promise<MarketsCache> {
   inFlight = null;
   return getMarkets();
 }
+
+/**
+ * Get the latest 10-year US Treasury yield, expressed as a percentage
+ * (e.g., 4.29 means 4.29%). Reads from the existing markets cache to
+ * avoid extra FMP calls — the same /stable/treasury-rates fetch that
+ * powers the ticker tape's yield row also serves the fundamentals
+ * Equity Risk Premium computation.
+ *
+ * Returns null if the markets cache is empty/errored or if the 10Y
+ * yield is missing from the cached commodities list. Used by
+ * lib/fundamentals.ts to compute ERP for the per-ticker badge.
+ */
+export async function get10YYield(): Promise<number | null> {
+  try {
+    const markets = await getMarkets();
+    const tenYear = markets.commodities.find((c) => c.symbol === 'US10Y');
+    if (!tenYear || typeof tenYear.price !== 'number') return null;
+    return tenYear.price;
+  } catch {
+    return null;
+  }
+}
