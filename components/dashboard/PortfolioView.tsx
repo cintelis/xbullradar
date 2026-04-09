@@ -332,16 +332,18 @@ export default function PortfolioView() {
             type="text"
             value={newTicker}
             onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
-            placeholder="Ticker"
+            placeholder="Ticker (e.g. AAPL)"
+            title="Stock symbol — 1 to 10 letters"
             disabled={mutating}
             maxLength={10}
-            className="w-24 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm font-mono uppercase text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
+            className="w-36 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm font-mono uppercase text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
           />
           <input
             type="number"
             value={newShares}
             onChange={(e) => setNewShares(e.target.value)}
-            placeholder="Shares"
+            placeholder="How many shares you own (e.g. 10)"
+            title="Number of shares you own — used to calculate position value and day change. Decimals OK for fractional shares."
             disabled={mutating}
             min={0}
             step="any"
