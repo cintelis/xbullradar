@@ -113,11 +113,13 @@ export async function requestMagicLink(email: string): Promise<{
 /**
  * Step 2 of sign-in: user clicks the link in their email, we verify the
  * token, mark it consumed, find or create the user, create a session, and
- * set the session cookie. Returns the user.
+ * set the session cookie. Returns the user AND a flag indicating whether
+ * this was the user's first ever sign-in (used by the route handler to
+ * fire the admin notification email only for genuinely new users).
  *
  * Throws AuthError if the token is missing/expired/already-used.
  */
-export async function verifyMagicLink(token: string): Promise<User> {
+export async function verifyMagicLink(token: string): Promise<{ user: User; isNew: boolean }> {
   const trimmed = String(token ?? '').trim();
   if (!trimmed) {
     throw new AuthError('Sign-in link is missing.', 400, 'TOKEN_MISSING');
@@ -147,6 +149,13 @@ export async function verifyMagicLink(token: string): Promise<User> {
     );
   }
 
+  // Detect first-time sign-in BEFORE createUser() so the caller can fire
+  // an admin notification only for genuinely new users (not returning
+  // sign-ins). createUser() is idempotent — returns the existing user if
+  // the email is already registered, so we need the lookup beforehand.
+  const existingUser = await authStore.getUserByEmail(ml.email);
+  const isNew = !existingUser;
+
   // Find or create the user. New users get auto-provisioned on first verify.
   const user = await authStore.createUser(ml.email);
   await authStore.touchUserLogin(user.id);
@@ -155,7 +164,7 @@ export async function verifyMagicLink(token: string): Promise<User> {
   const session = await authStore.createSession(user.id, user.email, getSessionTtlHours());
   await setSessionCookie(session);
 
-  return user;
+  return { user, isNew };
 }
 
 /**

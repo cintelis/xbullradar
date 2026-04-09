@@ -36,6 +36,7 @@ All env vars live in `.env` locally (gitignored) and in Vercel project settings 
 | `XBULLRADAR_STORE_PATH` | no | Override JsonFileStore path (local dev only). Default `./data/store.json` |
 | `EMAIL_API_URL` | no | Email worker endpoint. Default `https://email.365softlabs.com/api/send` |
 | `EMAIL_FROM` | no | Sender for magic link emails. Default `admin@xbullradar.com` |
+| `ADMIN_NOTIFICATION_EMAIL` | no | Destination for "new user signed in" notification emails. Default `admin@xbullradar.com`. Set to a different address if you want notifications routed elsewhere. |
 | `CF_ACCESS_CLIENT_ID` | prod | Cloudflare Access service token ID for the email worker |
 | `CF_ACCESS_CLIENT_SECRET` | prod | Paired secret for the CF Access service token |
 | `ALLOWED_EMAILS` | prod | Comma- or space-separated list of emails permitted to sign in. Empty/unset = anyone (intentional for local dev). |
