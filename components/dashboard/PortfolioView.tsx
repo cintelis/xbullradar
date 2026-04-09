@@ -26,11 +26,15 @@ import {
   type NextEarnings,
 } from '@/components/dashboard/EarningsBadge';
 import { ERPBadge } from '@/components/dashboard/ERPBadge';
+import { EditableNumber } from '@/components/dashboard/EditableNumber';
 import type {
   CashCategory,
   CashHolding,
   EnrichedPortfolioHolding,
 } from '@/types';
+
+const MAX_SHARES = 1_000_000_000;
+const MAX_CASH_AMOUNT = 1_000_000_000_000;
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
 
@@ -289,6 +293,19 @@ export default function PortfolioView() {
     }
   }
 
+  // Update a single holding's share count without removing + re-adding.
+  // Used by the inline EditableNumber in the desktop table + mobile card.
+  // The function is also exposed as the EditableNumber's onSave callback,
+  // so any errors thrown here will be caught by the component and roll
+  // the cell back to its prior value while setError displays the message.
+  async function updateHoldingShares(ticker: string, newShares: number) {
+    const next = rows.map((r) => ({
+      ticker: r.holding.ticker,
+      shares: r.holding.ticker === ticker ? newShares : r.holding.shares,
+    }));
+    await updateHoldings(next);
+  }
+
   // Replace the entire cash array server-side, then refetch.
   async function updateCash(next: CashHolding[]): Promise<void> {
     setMutating(true);
@@ -356,6 +373,16 @@ export default function PortfolioView() {
     } catch {
       // surfaced via setError
     }
+  }
+
+  // Update a single cash entry's amount via the EditableNumber inline
+  // editor. Mirrors updateHoldingShares — same throwing semantics so the
+  // editor can roll back the cell on failure.
+  async function updateCashAmount(id: string, newAmount: number) {
+    const next = cash.map((c) =>
+      c.id === id ? { ...c, amount: newAmount } : c,
+    );
+    await updateCash(next);
   }
 
   function startAddingCash() {
@@ -574,7 +601,24 @@ export default function PortfolioView() {
                 return (
                   <tr key={h.ticker} className="group border-t border-zinc-800/50">
                     <td className="py-2 pr-2 font-medium">{h.ticker}</td>
-                    <td className="py-2 px-2 text-right font-mono text-zinc-300">{h.shares}</td>
+                    <td className="py-2 px-2 text-right">
+                      <EditableNumber
+                        value={h.shares}
+                        format={(n) => formatShares(n)}
+                        onSave={(next) => updateHoldingShares(h.ticker, next)}
+                        validate={(n) =>
+                          n <= 0 || n > MAX_SHARES
+                            ? 'Shares must be a positive number.'
+                            : null
+                        }
+                        disabled={mutating}
+                        min={0}
+                        ariaLabel={`Edit ${h.ticker} shares`}
+                        title={`${h.ticker} — click to edit shares`}
+                        displayClassName="text-zinc-300"
+                        inputClassName="w-20"
+                      />
+                    </td>
                     <td className="py-2 px-2 text-right font-mono text-zinc-300">
                       {h.lastClose != null ? `$${h.lastClose.toFixed(2)}` : '—'}
                     </td>
@@ -693,9 +737,25 @@ export default function PortfolioView() {
                       <CombinedBadge signal={r.combined} />
                     </div>
                   </div>
-                  <p className="mt-0.5 text-xs text-zinc-500">
-                    {h.shares} {h.shares === 1 ? 'share' : 'shares'}
-                  </p>
+                  <div className="mt-0.5 flex items-center gap-1 text-xs text-zinc-500">
+                    <EditableNumber
+                      value={h.shares}
+                      format={(n) => formatShares(n)}
+                      onSave={(next) => updateHoldingShares(h.ticker, next)}
+                      validate={(n) =>
+                        n <= 0 || n > MAX_SHARES
+                          ? 'Shares must be a positive number.'
+                          : null
+                      }
+                      disabled={mutating}
+                      min={0}
+                      ariaLabel={`Edit ${h.ticker} shares`}
+                      title="Tap to edit shares"
+                      displayClassName="text-zinc-400"
+                      inputClassName="w-20"
+                    />
+                    <span>{h.shares === 1 ? 'share' : 'shares'}</span>
+                  </div>
                   {/* Row 2: individual signals + remove */}
                   <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/40 pt-2">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -756,6 +816,7 @@ export default function PortfolioView() {
         onCancelAdding={cancelAddingCash}
         onSubmit={addCashEntry}
         onRemove={removeCashEntry}
+        onUpdateAmount={updateCashAmount}
         totalCashValue={totals.cashValue}
         totalValue={totals.value}
       />
@@ -835,6 +896,8 @@ interface CashSectionProps {
   onCancelAdding: () => void;
   onSubmit: (e: FormEvent) => void;
   onRemove: (id: string) => void;
+  /** Inline-edit handler for the EditableNumber on each cash row. */
+  onUpdateAmount: (id: string, next: number) => Promise<void>;
   totalCashValue: number;
   totalValue: number | null;
 }
@@ -858,6 +921,7 @@ function CashSection(props: CashSectionProps) {
     onCancelAdding,
     onSubmit,
     onRemove,
+    onUpdateAmount,
     totalCashValue,
     totalValue,
   } = props;
@@ -1010,9 +1074,22 @@ function CashSection(props: CashSectionProps) {
                       <span className="truncate text-zinc-200">{c.label}</span>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className="font-mono text-zinc-200">
-                        {formatCurrency(c.amount)}
-                      </span>
+                      <EditableNumber
+                        value={c.amount}
+                        format={(n) => formatCurrency(n)}
+                        onSave={(next) => onUpdateAmount(c.id, next)}
+                        validate={(n) =>
+                          n < 0 || n > MAX_CASH_AMOUNT
+                            ? 'Cash amount must be a non-negative number.'
+                            : null
+                        }
+                        disabled={mutating}
+                        min={0}
+                        ariaLabel={`Edit ${c.label} amount`}
+                        title="Click to edit amount"
+                        displayClassName="text-zinc-200"
+                        inputClassName="w-28"
+                      />
                       {pct != null && (
                         <span className="font-mono text-xs text-zinc-600">
                           {pct.toFixed(1)}%
@@ -1067,6 +1144,19 @@ function formatCurrency(value: number): string {
     return `$${(value / 1_000).toFixed(1)}k`;
   }
   return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/**
+ * Format share counts. Whole numbers render without trailing .00 (so
+ * "10" not "10.00"); fractional shares render with up to 4 decimals to
+ * cover most brokerage precision (Schwab/Fidelity show 4dp).
+ */
+function formatShares(value: number): string {
+  if (Number.isInteger(value)) return String(value);
+  return value.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  });
 }
 
 function formatChange(amount: number | null, percent: number | null): string {
