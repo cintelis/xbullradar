@@ -227,6 +227,20 @@ export default function PortfolioView() {
       .finally(() => setLoading(false));
   }, [refreshAll]);
 
+  // Cross-component refresh: when the voice agent (or any other source)
+  // mutates the portfolio via /api/portfolio, it dispatches a custom
+  // 'portfolio:updated' event on window. We listen and re-fetch so the
+  // table reflects the change without a full page reload.
+  useEffect(() => {
+    function onPortfolioUpdated() {
+      refreshAll().catch((err) => setError((err as Error).message));
+    }
+    window.addEventListener('portfolio:updated', onPortfolioUpdated);
+    return () => {
+      window.removeEventListener('portfolio:updated', onPortfolioUpdated);
+    };
+  }, [refreshAll]);
+
   // Replace the entire holdings array server-side, then refetch.
   async function updateHoldings(next: Array<{ ticker: string; shares: number }>): Promise<void> {
     setMutating(true);

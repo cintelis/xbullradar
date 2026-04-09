@@ -10,6 +10,9 @@
 
 import { useEffect, useRef } from 'react';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
+import ConfirmChangeCard, {
+  type PendingProposal,
+} from './ConfirmChangeCard';
 import type {
   VoiceMode as VoiceModeType,
   VoiceTranscriptEntry,
@@ -22,6 +25,10 @@ interface VoiceModeProps {
   transcript: VoiceTranscriptEntry[];
   elapsed: number;
   onDisconnect: () => void;
+  /** Pending portfolio change proposals from tool calls. */
+  proposals?: PendingProposal[];
+  onProposalConfirm?: (id: string) => void;
+  onProposalCancel?: (id: string) => void;
 }
 
 export default function VoiceMode({
@@ -31,6 +38,9 @@ export default function VoiceMode({
   transcript,
   elapsed,
   onDisconnect,
+  proposals = [],
+  onProposalConfirm,
+  onProposalCancel,
 }: VoiceModeProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -38,7 +48,7 @@ export default function VoiceMode({
   // the text chat MessageBubble list.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [transcript, liveAssistantText]);
+  }, [transcript, liveAssistantText, proposals]);
 
   return (
     // flex-1 + min-h-0 is the magic combo that lets the inner transcript
@@ -100,6 +110,15 @@ export default function VoiceMode({
             partial
           />
         )}
+        {proposals.length > 0 &&
+          proposals.map((p) => (
+            <ConfirmChangeCard
+              key={p.id}
+              proposal={p}
+              onConfirm={onProposalConfirm ?? (() => {})}
+              onCancel={onProposalCancel ?? (() => {})}
+            />
+          ))}
       </div>
     </div>
   );

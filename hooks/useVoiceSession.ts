@@ -58,6 +58,34 @@ export interface VoiceTranscriptEntry {
   text: string;
 }
 
+/**
+ * Tool call handler function. The hook calls this when xAI sends a
+ * response.function_call_arguments.done event. The handler receives
+ * the parsed arguments and returns an output object that gets sent
+ * back to xAI as the function_call_output.
+ */
+export type VoiceToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Map of tool-function name → handler. Register this via the `toolHandlers`
+ * option when calling useVoiceSession. Keys must match the function names
+ * declared in the xAI session config (app/api/voice/route.ts).
+ */
+export type VoiceToolHandlers = Record<string, VoiceToolHandler>;
+
+export interface UseVoiceSessionOptions {
+  /**
+   * Tool call handlers. When the bot invokes a function, the hook looks
+   * up the function name in this map and calls the handler. The returned
+   * value is sent back to xAI as the function_call_output so the bot
+   * can incorporate it into its next reply.
+   *
+   * If no handler is registered for a function name, the hook sends back
+   * a generic error output and logs a warning.
+   */
+  toolHandlers?: VoiceToolHandlers;
+}
+
 export interface UseVoiceSessionResult {
   mode: VoiceMode;
   error: string | null;
@@ -82,7 +110,16 @@ interface VoiceConfigResponse {
   error?: string;
 }
 
-export function useVoiceSession(): UseVoiceSessionResult {
+export function useVoiceSession(
+  options: UseVoiceSessionOptions = {},
+): UseVoiceSessionResult {
+  const toolHandlersRef = useRef<VoiceToolHandlers>(options.toolHandlers ?? {});
+  // Keep the ref in sync with the latest handlers so hot-reloads and
+  // re-renders don't stale-capture the initial handlers.
+  useEffect(() => {
+    toolHandlersRef.current = options.toolHandlers ?? {};
+  }, [options.toolHandlers]);
+
   const [mode, setMode] = useState<VoiceMode>('idle');
   const [error, setError] = useState<string | null>(null);
   const [liveAssistantText, setLiveAssistantText] = useState('');
@@ -294,6 +331,12 @@ export function useVoiceSession(): UseVoiceSessionResult {
           setMode('listening');
           break;
 
+        case 'response.function_call_arguments.done':
+          // Bot invoked a tool. Look up the handler, call it, send output
+          // back to xAI so the bot can continue the conversation.
+          void handleFunctionCall(msg);
+          break;
+
         case 'error': {
           const errMsg =
             (msg.error as { message?: string } | undefined)?.message ??
@@ -309,6 +352,59 @@ export function useVoiceSession(): UseVoiceSessionResult {
     },
     [queueAudio],
   );
+
+  /**
+   * Handle a tool invocation from xAI. Parses the arguments, calls the
+   * registered handler, and sends the output back over the WebSocket so
+   * the bot can weave the result into its next spoken reply.
+   */
+  async function handleFunctionCall(msg: Record<string, unknown>) {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const callId = typeof msg.call_id === 'string' ? msg.call_id : '';
+    const name = typeof msg.name === 'string' ? msg.name : '';
+
+    let args: Record<string, unknown> = {};
+    try {
+      args =
+        typeof msg.arguments === 'string'
+          ? (JSON.parse(msg.arguments) as Record<string, unknown>)
+          : {};
+    } catch {
+      args = {};
+    }
+
+    const handler = toolHandlersRef.current[name];
+    let output: unknown;
+    if (handler) {
+      try {
+        output = await handler(args);
+      } catch (err) {
+        console.error(`[voice] tool handler "${name}" threw`, err);
+        output = { error: `Tool handler error: ${(err as Error).message}` };
+      }
+    } else {
+      console.warn(`[voice] no handler for tool "${name}"`);
+      output = { error: `Unknown tool: ${name}` };
+    }
+
+    // Send the output back to xAI.
+    ws.send(
+      JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: typeof output === 'string' ? output : JSON.stringify(output),
+        },
+      }),
+    );
+
+    // Request the bot to continue after processing the tool result.
+    responseInFlightRef.current = false;
+    ws.send(JSON.stringify({ type: 'response.create' }));
+  }
 
   // ── Mic capture ────────────────────────────────────────────────────────
   const startMic = useCallback(

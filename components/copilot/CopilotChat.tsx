@@ -5,12 +5,16 @@
 // JSON wire format defined in @/types and render generative UI (ActButton)
 // inline by inspecting the assistant message's `ui` field.
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Download, Mic, Send, Trash2, ChevronRight } from 'lucide-react';
 import ActButton from './ActButton';
 import VoiceMode from './VoiceMode';
+import ConfirmChangeCard, {
+  type PendingProposal,
+  type ProposalStatus,
+} from './ConfirmChangeCard';
 import { Button } from '@/components/ui/button';
-import { useVoiceSession } from '@/hooks/useVoiceSession';
+import { useVoiceSession, type VoiceToolHandlers } from '@/hooks/useVoiceSession';
 import type { CopilotResponse, CopilotUiAction } from '@/types';
 
 interface CopilotChatProps {
@@ -61,11 +65,135 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   const [hydrated, setHydrated] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Pending portfolio change proposals from voice tool calls. Each entry
+  // is a two-stage commit card: the bot proposes, the user confirms.
+  const [proposals, setProposals] = useState<PendingProposal[]>([]);
+
+  const handleProposalConfirm = useCallback(async (id: string) => {
+    setProposals((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, status: 'confirming' as ProposalStatus } : p)),
+    );
+    const proposal = proposals.find((p) => p.id === id);
+    if (!proposal) return;
+
+    try {
+      // Load current holdings so we can merge the change.
+      const res = await fetch('/api/portfolio');
+      const data = await res.json();
+      const holdings: Array<{ ticker: string; shares: number }> =
+        (data.holdings ?? []).map((h: { ticker: string; shares: number }) => ({
+          ticker: h.ticker,
+          shares: h.shares,
+        }));
+
+      let next: Array<{ ticker: string; shares: number }>;
+      if (proposal.newShares === 0) {
+        // Remove the holding.
+        next = holdings.filter(
+          (h) => h.ticker.toUpperCase() !== proposal.ticker.toUpperCase(),
+        );
+      } else {
+        const exists = holdings.some(
+          (h) => h.ticker.toUpperCase() === proposal.ticker.toUpperCase(),
+        );
+        if (exists) {
+          next = holdings.map((h) =>
+            h.ticker.toUpperCase() === proposal.ticker.toUpperCase()
+              ? { ...h, shares: proposal.newShares }
+              : h,
+          );
+        } else {
+          next = [...holdings, { ticker: proposal.ticker.toUpperCase(), shares: proposal.newShares }];
+        }
+      }
+
+      const putRes = await fetch('/api/portfolio', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ holdings: next }),
+      });
+      if (!putRes.ok) {
+        const err = await putRes.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error || `HTTP ${putRes.status}`);
+      }
+
+      setProposals((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, status: 'confirmed' as ProposalStatus } : p)),
+      );
+      // Notify PortfolioView to refresh.
+      window.dispatchEvent(new CustomEvent('portfolio:updated'));
+    } catch (err) {
+      console.error('[copilot] portfolio update failed', err);
+      setProposals((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, status: 'pending' as ProposalStatus } : p)),
+      );
+    }
+  }, [proposals]);
+
+  const handleProposalCancel = useCallback((id: string) => {
+    setProposals((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, status: 'cancelled' as ProposalStatus } : p)),
+    );
+  }, []);
+
+  // Voice tool handlers — registered with useVoiceSession so the hook
+  // can dispatch tool calls from xAI to our handlers.
+  const toolHandlers: VoiceToolHandlers = useMemo(
+    () => ({
+      propose_holding_change: async (args: Record<string, unknown>) => {
+        const ticker =
+          typeof args.ticker === 'string'
+            ? args.ticker.trim().toUpperCase()
+            : '';
+        const newShares =
+          typeof args.new_shares === 'number' ? args.new_shares : 0;
+        const reason =
+          typeof args.reason === 'string' ? args.reason : '';
+
+        if (!ticker) {
+          return { error: 'Missing ticker.' };
+        }
+
+        // Fetch current shares so the card can show "50 → 40".
+        let currentShares = 0;
+        try {
+          const res = await fetch('/api/portfolio');
+          const data = await res.json();
+          const match = (data.holdings ?? []).find(
+            (h: { ticker: string }) =>
+              h.ticker.toUpperCase() === ticker,
+          );
+          if (match) currentShares = match.shares;
+        } catch {
+          // Non-critical — card will show 0 → newShares which is still
+          // understandable.
+        }
+
+        const proposal: PendingProposal = {
+          id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          callId: '',
+          ticker,
+          currentShares,
+          newShares,
+          reason,
+          status: 'pending',
+        };
+        setProposals((prev) => [...prev, proposal]);
+
+        return {
+          proposed: true,
+          message: `Confirmation card shown to user for ${ticker}: ${currentShares} → ${newShares} shares. User must click Confirm on screen.`,
+        };
+      },
+    }),
+    [],
+  );
+
   // Voice session — when mode !== 'idle', we render <VoiceMode /> in place
   // of the text message list. The single chat input button switches between
   // mic-icon (empty input → click to start voice) and send-icon (text in
   // input → click to send a text turn).
-  const voice = useVoiceSession();
+  const voice = useVoiceSession({ toolHandlers });
   const voiceActive = voice.mode !== 'idle' && voice.mode !== 'error';
   const prevVoiceActiveRef = useRef(voiceActive);
 
@@ -347,6 +475,9 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
           transcript={voice.transcript}
           elapsed={voice.elapsed}
           onDisconnect={voice.disconnect}
+          proposals={proposals}
+          onProposalConfirm={handleProposalConfirm}
+          onProposalCancel={handleProposalCancel}
         />
       ) : (
         <>

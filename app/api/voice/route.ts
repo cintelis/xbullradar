@@ -87,6 +87,39 @@ export async function POST(_request: NextRequest) {
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
           input_audio_transcription: { model: 'whisper-1' },
+          tools: [
+            {
+              type: 'function',
+              name: 'propose_holding_change',
+              description:
+                'Propose a change to the user\'s stock portfolio. This renders a confirmation card on the user\'s screen — the actual change only happens when the user clicks Confirm. ' +
+                'IMPORTANT: you MUST get the user\'s explicit verbal consent BEFORE calling this tool. Say exactly what you plan to change and why, and wait for them to say "yes" or "go ahead". ' +
+                'Do NOT call this tool on vague wording like "I\'m thinking about it" or "maybe". ' +
+                'Use new_shares = 0 to propose removing a holding entirely. Use a positive number to set the holding to that many shares (not add — SET).',
+              parameters: {
+                type: 'object',
+                properties: {
+                  ticker: {
+                    type: 'string',
+                    description:
+                      'Stock ticker symbol in uppercase, e.g. NVDA, MSFT',
+                  },
+                  new_shares: {
+                    type: 'number',
+                    description:
+                      'The new total share count to set. 0 = remove holding. Must be non-negative.',
+                  },
+                  reason: {
+                    type: 'string',
+                    description:
+                      'Brief explanation of why this change is being proposed. Shown on the confirmation card so the user can make an informed decision.',
+                  },
+                },
+                required: ['ticker', 'new_shares', 'reason'],
+                additionalProperties: false,
+              },
+            },
+          ],
         },
       }),
     });
