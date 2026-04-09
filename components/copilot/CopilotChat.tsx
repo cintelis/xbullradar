@@ -6,7 +6,7 @@
 // inline by inspecting the assistant message's `ui` field.
 
 import { useState, useRef, useEffect } from 'react';
-import { Mic, Send, Trash2, ChevronRight } from 'lucide-react';
+import { Download, Mic, Send, Trash2, ChevronRight } from 'lucide-react';
 import ActButton from './ActButton';
 import VoiceMode from './VoiceMode';
 import { Button } from '@/components/ui/button';
@@ -24,7 +24,13 @@ interface CopilotChatProps {
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  /**
+   * 'user' / 'assistant' are normal turn bubbles. 'system' is a divider
+   * line — used to mark the start of a folded-in voice session with a
+   * timestamp and duration so users (and exports) can tell sessions
+   * apart.
+   */
+  role: 'user' | 'assistant' | 'system';
   content: string;
   ui?: CopilotUiAction;
   citations?: string[];
@@ -63,6 +69,12 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   const voiceActive = voice.mode !== 'idle' && voice.mode !== 'error';
   const prevVoiceActiveRef = useRef(voiceActive);
 
+  // Two-state morphing button: starts as Export → click downloads chat
+  // → button morphs to Trash → click clears chat → resets to Export.
+  // Any new message resets `exported` to false so users know there's
+  // unsaved content.
+  const [exported, setExported] = useState(false);
+
   // When the voice session ends, fold its transcript into the text chat
   // history. The text history is already persisted to localStorage by the
   // useEffect below, so this gives us free voice persistence — users can
@@ -70,22 +82,48 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   // ones, share them with us as examples, etc.
   //
   // Each voice message gets source: 'voice' so MessageBubble can render
-  // it with a small mic indicator. We also slot in a system divider to
-  // mark where the voice conversation started.
+  // it with a small mic indicator. We also prepend a system divider that
+  // includes the start time + duration of the call so multiple voice
+  // sessions in the same chat are visually + textually distinguishable.
   useEffect(() => {
     const wasActive = prevVoiceActiveRef.current;
     prevVoiceActiveRef.current = voiceActive;
     if (!wasActive || voiceActive) return;
     if (voice.transcript.length === 0) return;
 
+    const endedAt = new Date();
+    const startedAt = new Date(endedAt.getTime() - voice.elapsed * 1000);
+    const divider: ChatMessage = {
+      id: `vs-${endedAt.getTime()}`,
+      role: 'system',
+      content: `Voice call · ${formatSessionStart(startedAt)} · ${formatSessionDuration(voice.elapsed)}`,
+    };
     const folded: ChatMessage[] = voice.transcript.map((t) => ({
       id: `v-${t.id}`,
       role: t.role === 'user' ? 'user' : 'assistant',
       content: t.text,
       source: 'voice',
     }));
-    setMessages((prev) => [...prev, ...folded]);
-  }, [voiceActive, voice.transcript]);
+    setMessages((prev) => [...prev, divider, ...folded]);
+    setExported(false);
+  }, [voiceActive, voice.transcript, voice.elapsed]);
+
+  // Any new text-mode message also flips exported back to false so the
+  // header button reverts to Export icon.
+  useEffect(() => {
+    if (messages.length > 1) setExported(false);
+    // We deliberately watch messages length, not the array, to avoid
+    // resetting on every keystroke / re-render. New turns push length up.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length]);
+
+  function exportChat() {
+    if (messages.length <= 1) return;
+    const text = formatChatAsText(messages);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    downloadTextFile(`xbullradar-chat-${stamp}.txt`, text);
+    setExported(true);
+  }
 
   // Hydrate from localStorage once on mount.
   useEffect(() => {
@@ -128,6 +166,7 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   function clearChat() {
     setMessages([WELCOME_MESSAGE]);
     setPreviousResponseId(undefined);
+    setExported(false);
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -198,16 +237,34 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
           </p>
         </div>
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={clearChat}
-            disabled={loading || messages.length <= 1}
-            title="Clear conversation"
-            aria-label="Clear conversation"
-            className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
+          {/* Morphing Export ↔ Trash button. Default Export icon — click
+              downloads the conversation as a .txt file, then morphs to
+              Trash. Click Trash to clear the chat. New messages reset
+              the button back to Export so users always know whether
+              they have unsaved content. */}
+          {exported ? (
+            <button
+              type="button"
+              onClick={clearChat}
+              disabled={loading || messages.length <= 1}
+              title="Clear conversation (already exported)"
+              aria-label="Clear conversation"
+              className="rounded-md p-1.5 text-red-400 transition hover:bg-zinc-900 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={exportChat}
+              disabled={loading || messages.length <= 1}
+              title="Export conversation to text file"
+              aria-label="Export conversation"
+              className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <Download className="h-4 w-4" />
+            </button>
+          )}
           {onHide && (
             <button
               type="button"
@@ -294,6 +351,18 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
 }
 
 function MessageBubble({ msg }: { msg: ChatMessage }) {
+  // System messages render as a centered horizontal divider with the
+  // label inline — used for voice-call timestamp markers. Not a bubble.
+  if (msg.role === 'system') {
+    return (
+      <div className="flex items-center gap-2 py-1 text-[11px] uppercase tracking-wide text-zinc-600">
+        <div className="h-px flex-1 bg-zinc-800" />
+        <span>{msg.content}</span>
+        <div className="h-px flex-1 bg-zinc-800" />
+      </div>
+    );
+  }
+
   const isUser = msg.role === 'user';
   const isVoice = msg.source === 'voice';
   return (
@@ -377,4 +446,82 @@ function hostnameOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+// ─── Export helpers ─────────────────────────────────────────────────────
+
+/**
+ * Format the chat history as a plain-text export. Designed for two
+ * audiences: the user reading their own conversation later, and us
+ * receiving examples to tune the system prompt.
+ *
+ * Each turn is tagged with [user] / [assistant] (with `· voice` suffix
+ * if it came from a voice session). System dividers (e.g. "Voice call ·
+ * 2:32 PM · 3m 21s") get rendered as section headers between turn
+ * groups so multi-session histories are scannable.
+ */
+function formatChatAsText(messages: ChatMessage[]): string {
+  const generated = new Date();
+  const lines: string[] = [];
+  lines.push('xBullRadar conversation export');
+  lines.push(`Generated: ${generated.toISOString()}`);
+  lines.push('');
+
+  for (const m of messages) {
+    if (m.id === 'welcome') continue;
+
+    if (m.role === 'system') {
+      lines.push('');
+      lines.push('═'.repeat(60));
+      lines.push(m.content);
+      lines.push('═'.repeat(60));
+      lines.push('');
+      continue;
+    }
+
+    const tag =
+      m.source === 'voice' ? `[${m.role} · voice]` : `[${m.role}]`;
+    lines.push(`${tag} ${m.content}`);
+    if (!('role' in m && m.role === 'user') && m.citations && m.citations.length > 0) {
+      for (let i = 0; i < m.citations.length; i++) {
+        lines.push(`  [${i + 1}] ${m.citations[i]}`);
+      }
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/** Trigger a browser download of a text file. No network round-trip. */
+function downloadTextFile(filename: string, content: string): void {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Defer revoke so the click has time to fire in all browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** "Apr 9, 2:32 PM" — short, locale-agnostic-ish, fits in a divider. */
+function formatSessionStart(date: Date): string {
+  const month = date.toLocaleString('en-US', { month: 'short' });
+  const day = date.getDate();
+  let hour = date.getHours();
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  hour = hour % 12 === 0 ? 12 : hour % 12;
+  return `${month} ${day}, ${hour}:${minute} ${ampm}`;
+}
+
+/** "3m 21s" / "45s" — duration format for session dividers. */
+function formatSessionDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
 }
