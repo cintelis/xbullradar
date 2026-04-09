@@ -28,6 +28,12 @@ interface ChatMessage {
   content: string;
   ui?: CopilotUiAction;
   citations?: string[];
+  /**
+   * If 'voice', this message originated from a voice session and was
+   * folded into the text history when the call ended. Renders with a
+   * small mic indicator so the user knows it was spoken, not typed.
+   */
+  source?: 'voice';
 }
 
 const STORAGE_KEY = 'xbullradar:chat:v1';
@@ -55,6 +61,31 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   // input → click to send a text turn).
   const voice = useVoiceSession();
   const voiceActive = voice.mode !== 'idle' && voice.mode !== 'error';
+  const prevVoiceActiveRef = useRef(voiceActive);
+
+  // When the voice session ends, fold its transcript into the text chat
+  // history. The text history is already persisted to localStorage by the
+  // useEffect below, so this gives us free voice persistence — users can
+  // scroll back through past voice conversations alongside their text
+  // ones, share them with us as examples, etc.
+  //
+  // Each voice message gets source: 'voice' so MessageBubble can render
+  // it with a small mic indicator. We also slot in a system divider to
+  // mark where the voice conversation started.
+  useEffect(() => {
+    const wasActive = prevVoiceActiveRef.current;
+    prevVoiceActiveRef.current = voiceActive;
+    if (!wasActive || voiceActive) return;
+    if (voice.transcript.length === 0) return;
+
+    const folded: ChatMessage[] = voice.transcript.map((t) => ({
+      id: `v-${t.id}`,
+      role: t.role === 'user' ? 'user' : 'assistant',
+      content: t.text,
+      source: 'voice',
+    }));
+    setMessages((prev) => [...prev, ...folded]);
+  }, [voiceActive, voice.transcript]);
 
   // Hydrate from localStorage once on mount.
   useEffect(() => {
@@ -264,6 +295,7 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
 
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   const isUser = msg.role === 'user';
+  const isVoice = msg.source === 'voice';
   return (
     <div className={isUser ? 'text-right' : ''}>
       <div
@@ -274,6 +306,17 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
             : 'bg-zinc-900 text-zinc-100')
         }
       >
+        {isVoice && (
+          <div
+            className={
+              'mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wide ' +
+              (isUser ? 'text-green-200' : 'text-zinc-500')
+            }
+          >
+            <Mic className="h-2.5 w-2.5" />
+            voice
+          </div>
+        )}
         <p className="whitespace-pre-wrap">{msg.content}</p>
         {msg.ui?.type === 'showActButton' && (
           <div className="mt-3">

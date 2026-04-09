@@ -41,9 +41,14 @@ export default function VoiceMode({
   }, [transcript, liveAssistantText]);
 
   return (
-    <div className="flex h-full flex-col">
+    // flex-1 + min-h-0 is the magic combo that lets the inner transcript
+    // div actually scroll inside a nested flex-column parent. Without
+    // min-h-0, the flex item grows to fit content instead of shrinking
+    // to fit the container, and overflow-auto becomes a no-op. Without
+    // flex-1, we don't fill the chat panel's available height.
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Status header — replaces the chat input area's "Thinking…" hint */}
-      <div className="border-b border-zinc-800 px-4 py-3">
+      <div className="shrink-0 border-b border-zinc-800 px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <StatusIndicator mode={mode} />
@@ -70,10 +75,11 @@ export default function VoiceMode({
         )}
       </div>
 
-      {/* Transcript area — finalized turns + the live partial */}
+      {/* Transcript area — finalized turns + the live partial.
+          min-h-0 lets this flex child shrink so overflow-auto can kick in. */}
       <div
         ref={scrollRef}
-        className="flex-1 space-y-4 overflow-auto p-4"
+        className="min-h-0 flex-1 space-y-4 overflow-auto p-4"
       >
         {transcript.length === 0 && !liveAssistantText && (
           <p className="text-sm text-zinc-500">
