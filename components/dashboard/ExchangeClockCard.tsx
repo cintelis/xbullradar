@@ -161,8 +161,7 @@ export default function ExchangeClockCard() {
           <p className="mb-3 text-sm text-zinc-300">{selected.name}</p>
           <dl className="space-y-2 text-xs">
             <ClockRow label="Local time" value={formatLocalTime(selected.timezone, now)} mono />
-            <ClockRow label="Opens" value={formatTime(selected.openingHour)} mono />
-            <ClockRow label="Closes" value={formatTime(selected.closingHour)} mono />
+            <SessionRows exchange={selected} />
           </dl>
           <CountdownLine exchange={selected} now={now} />
         </div>
@@ -246,6 +245,35 @@ function ClockRow({
   );
 }
 
+/**
+ * Render trading hours for the exchange. For exchanges with a single
+ * continuous session (e.g. NYSE), show one Opens/Closes pair. For exchanges
+ * with a lunch break (most Asian markets), show one row per session.
+ */
+function SessionRows({ exchange }: { exchange: ExchangeHours }) {
+  const sessions = getSessions(exchange);
+  if (sessions.length === 1) {
+    return (
+      <>
+        <ClockRow label="Opens" value={formatTime(exchange.openingHour)} mono />
+        <ClockRow label="Closes" value={formatTime(exchange.closingHour)} mono />
+      </>
+    );
+  }
+  return (
+    <>
+      {sessions.map((s, i) => (
+        <ClockRow
+          key={i}
+          label={`Session ${i + 1}`}
+          value={`${formatMinutes(s.openMinutes)} – ${formatMinutes(s.closeMinutes)}`}
+          mono
+        />
+      ))}
+    </>
+  );
+}
+
 function CountdownLine({ exchange, now }: { exchange: ExchangeHours; now: Date }) {
   const isOpen = isMarketOpenNow(exchange, now);
   const minutes = isOpen
@@ -264,54 +292,169 @@ function CountdownLine({ exchange, now }: { exchange: ExchangeHours; now: Date }
 
 // ─── Time helpers ───────────────────────────────────────────────────────────
 
+interface Session {
+  /** Minutes since local midnight when the session opens. */
+  openMinutes: number;
+  /** Minutes since local midnight when the session closes. */
+  closeMinutes: number;
+}
+
+/**
+ * Lunch-break overrides for exchanges where FMP returns a single open/close
+ * pair but the venue actually pauses mid-day. Matched by name substring or
+ * exchange code so we don't depend on FMP's exact code naming. All times are
+ * the exchange's LOCAL time.
+ *
+ * Sources cross-checked against each exchange's official trading hours page.
+ * Tokyo's afternoon session was extended to 15:30 in November 2024.
+ */
+const LUNCH_BREAK_OVERRIDES: Array<{
+  match: (ex: ExchangeHours) => boolean;
+  sessions: Array<{ open: string; close: string }>; // "HH:MM" 24h
+}> = [
+  {
+    match: (ex) => /shanghai/i.test(ex.name) || ex.exchange === 'SHH',
+    sessions: [
+      { open: '09:30', close: '11:30' },
+      { open: '13:00', close: '15:00' },
+    ],
+  },
+  {
+    match: (ex) => /shenzhen/i.test(ex.name) || ex.exchange === 'SHZ',
+    sessions: [
+      { open: '09:30', close: '11:30' },
+      { open: '13:00', close: '15:00' },
+    ],
+  },
+  {
+    match: (ex) => /hong\s*kong/i.test(ex.name) || ex.exchange === 'HKSE',
+    sessions: [
+      { open: '09:30', close: '12:00' },
+      { open: '13:00', close: '16:00' },
+    ],
+  },
+  {
+    match: (ex) =>
+      /tokyo|japan/i.test(ex.name) || ex.exchange === 'JPX' || ex.exchange === 'TYO',
+    sessions: [
+      { open: '09:00', close: '11:30' },
+      { open: '12:30', close: '15:30' },
+    ],
+  },
+  {
+    match: (ex) => /singapore/i.test(ex.name) || ex.exchange === 'SGX',
+    sessions: [
+      { open: '09:00', close: '12:00' },
+      { open: '13:00', close: '17:00' },
+    ],
+  },
+  {
+    match: (ex) => /malaysia|bursa/i.test(ex.name),
+    sessions: [
+      { open: '09:00', close: '12:30' },
+      { open: '14:30', close: '17:00' },
+    ],
+  },
+  {
+    match: (ex) => /thailand/i.test(ex.name),
+    sessions: [
+      { open: '10:00', close: '12:30' },
+      { open: '14:30', close: '16:30' },
+    ],
+  },
+  {
+    match: (ex) => /indonesia|jakarta/i.test(ex.name),
+    sessions: [
+      { open: '09:00', close: '11:30' },
+      { open: '13:30', close: '15:50' },
+    ],
+  },
+  {
+    match: (ex) => /philippine/i.test(ex.name),
+    sessions: [
+      { open: '09:30', close: '12:00' },
+      { open: '13:30', close: '15:00' },
+    ],
+  },
+];
+
+/**
+ * Return the trading sessions for an exchange in local-minute coordinates.
+ * Falls back to a single session built from FMP's openingHour/closingHour
+ * when no override matches.
+ */
+function getSessions(exchange: ExchangeHours): Session[] {
+  const override = LUNCH_BREAK_OVERRIDES.find((o) => o.match(exchange));
+  if (override) {
+    return override.sessions.map((s) => ({
+      openMinutes: parseHHMM(s.open),
+      closeMinutes: parseHHMM(s.close),
+    }));
+  }
+  const open = parseHourString(exchange.openingHour);
+  const close = parseHourString(exchange.closingHour);
+  return [
+    {
+      openMinutes: open.hour * 60 + open.minute,
+      closeMinutes: close.hour * 60 + close.minute,
+    },
+  ];
+}
+
+function parseHHMM(s: string): number {
+  const [h, m] = s.split(':').map((n) => parseInt(n, 10));
+  return (h || 0) * 60 + (m || 0);
+}
+
 /**
  * Compute "is the market open right now" using the IANA timezone +
- * opening/closing hours from FMP. Closed on Sat/Sun. Doesn't handle
- * holidays (deferred — would need a holiday calendar).
+ * sessions list. Closed on Sat/Sun. Doesn't handle holidays (deferred —
+ * would need a holiday calendar).
  */
 function isMarketOpenNow(exchange: ExchangeHours, now: Date): boolean {
   const local = exchangeLocalTime(exchange, now);
   if (local.weekday === 'Sat' || local.weekday === 'Sun') return false;
-
-  const open = parseHourString(exchange.openingHour);
-  const close = parseHourString(exchange.closingHour);
   const nowMinutes = local.hour * 60 + local.minute;
-  const openMinutes = open.hour * 60 + open.minute;
-  const closeMinutes = close.hour * 60 + close.minute;
-
-  return nowMinutes >= openMinutes && nowMinutes < closeMinutes;
+  return getSessions(exchange).some(
+    (s) => nowMinutes >= s.openMinutes && nowMinutes < s.closeMinutes,
+  );
 }
 
 /**
- * Minutes from now until the exchange closes for the day (assumes the
- * market is currently open). Returns null if not currently open.
+ * Minutes until the currently-active session closes. Returns null if no
+ * session is currently active (including weekends and lunch breaks).
  */
 function minutesUntilClose(exchange: ExchangeHours, now: Date): number | null {
-  if (!isMarketOpenNow(exchange, now)) return null;
   const local = exchangeLocalTime(exchange, now);
-  const close = parseHourString(exchange.closingHour);
+  if (local.weekday === 'Sat' || local.weekday === 'Sun') return null;
   const nowMinutes = local.hour * 60 + local.minute;
-  const closeMinutes = close.hour * 60 + close.minute;
-  return Math.max(0, closeMinutes - nowMinutes);
+  const active = getSessions(exchange).find(
+    (s) => nowMinutes >= s.openMinutes && nowMinutes < s.closeMinutes,
+  );
+  if (!active) return null;
+  return Math.max(0, active.closeMinutes - nowMinutes);
 }
 
 /**
- * Minutes from now until the exchange next opens. Handles weekends by
- * walking forward day-by-day until we find a non-weekend.
+ * Minutes until the next session opens. Handles three cases:
+ *   1. Before today's first session → minutes until first session opens
+ *   2. Mid lunch break → minutes until next session opens (still today)
+ *   3. After last session, weekend, or holiday → walk forward to next
+ *      weekday and use that day's first session
  */
 function minutesUntilNextOpen(exchange: ExchangeHours, now: Date): number | null {
   const local = exchangeLocalTime(exchange, now);
-  const open = parseHourString(exchange.openingHour);
   const nowMinutes = local.hour * 60 + local.minute;
-  const openMinutes = open.hour * 60 + open.minute;
-
-  // Today, before open and not a weekend → opens today
+  const sessions = getSessions(exchange);
   const isWeekend = local.weekday === 'Sat' || local.weekday === 'Sun';
-  if (!isWeekend && nowMinutes < openMinutes) {
-    return openMinutes - nowMinutes;
+
+  // Cases 1 + 2: still on a weekday and there's a future session today
+  if (!isWeekend) {
+    const upcoming = sessions.find((s) => nowMinutes < s.openMinutes);
+    if (upcoming) return upcoming.openMinutes - nowMinutes;
   }
 
-  // Otherwise walk forward through days until we hit a weekday
+  // Case 3: walk forward through days until we hit a weekday
   let daysAhead = 1;
   let nextWeekday = nextDay(local.weekday);
   while (nextWeekday === 'Sat' || nextWeekday === 'Sun') {
@@ -319,10 +462,10 @@ function minutesUntilNextOpen(exchange: ExchangeHours, now: Date): number | null
     nextWeekday = nextDay(nextWeekday);
   }
 
-  // Time until midnight today + days × 1440 min + opening minutes
+  const firstOpen = sessions[0]?.openMinutes ?? 0;
   const minutesUntilEndOfToday = 24 * 60 - nowMinutes;
   const fullDaysInBetween = (daysAhead - 1) * 24 * 60;
-  return minutesUntilEndOfToday + fullDaysInBetween + openMinutes;
+  return minutesUntilEndOfToday + fullDaysInBetween + firstOpen;
 }
 
 const WEEKDAY_ORDER = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -384,6 +527,15 @@ function formatLocalTime(timezone: string, now: Date): string {
 /** "09:30 AM -04:00" → "09:30 AM" — strip the trailing offset. */
 function formatTime(s: string): string {
   return s.replace(/\s*[-+]\d{2}:?\d{2}\s*$/, '').trim();
+}
+
+/** 570 → "09:30 AM" — minutes since local midnight to a 12-hour clock. */
+function formatMinutes(totalMinutes: number): string {
+  const h24 = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  const ampm = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
 function formatDuration(totalMinutes: number): string {
