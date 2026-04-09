@@ -30,6 +30,36 @@ export interface PortfolioHolding {
 }
 
 /**
+ * Non-equity entries the user holds — cash, stablecoins, bonds, anything
+ * that isn't a tradeable ticker. Each entry is just a USD value with a
+ * label and category. We don't compute price or day-change for these
+ * because they don't have a market quote (cash IS the price).
+ *
+ * Treated by the portfolio totals as having an Equity Risk Premium of
+ * exactly 0 — they earn approximately the risk-free rate (money-market
+ * yields, on-chain stablecoin yields like Aave/Ondo, treasury yields)
+ * which is the same thing the ERP formula subtracts. Including cash in
+ * the portfolio ERP correctly drags it toward zero, so a 50% cash
+ * portfolio shows roughly half the equity-only ERP.
+ *
+ * Direct bond holdings (e.g. you own a $10k 5-year T-note) are tracked
+ * with category 'bond' but get the same ERP=0 treatment for now. Bond
+ * ETFs (TLT, SGOV, AGG, etc.) should be tracked as regular holdings,
+ * not cash entries — they have prices and sentiment.
+ */
+export type CashCategory = 'cash' | 'stablecoin' | 'bond' | 'other';
+
+export interface CashHolding {
+  /** Stable id for React keys + edit/remove operations. */
+  id: string;
+  /** User-supplied label, e.g. "Schwab brokerage", "USDC wallet", "5Y T-note". */
+  label: string;
+  /** USD value of the entry. Always positive. */
+  amount: number;
+  category: CashCategory;
+}
+
+/**
  * Enriched holding returned by the /api/portfolio GET endpoint. Adds the
  * computed fields the UI needs: end-of-day price, day change %, total
  * value, and the latest Grok sentiment score.

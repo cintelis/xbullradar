@@ -15,13 +15,14 @@
 // HSET field updates per user instead of rewriting one big blob.
 
 import { Redis } from '@upstash/redis';
-import type { PortfolioHolding, StockSentiment } from '@/types';
+import type { CashHolding, PortfolioHolding, StockSentiment } from '@/types';
 import type { Store } from './store-types';
 import { DEFAULT_USER_DATA } from './store-types';
 
 const KEY_USERS_SET = 'xbr:users';
 const KEY_WATCHLIST = (userId: string) => `xbr:user:${userId}:watchlist`;
 const KEY_HOLDINGS = (userId: string) => `xbr:user:${userId}:holdings`;
+const KEY_CASH = (userId: string) => `xbr:user:${userId}:cash`;
 const KEY_SENTIMENT_HASH = (userId: string) => `xbr:user:${userId}:sentiment:last`;
 
 export class UpstashStore implements Store {
@@ -80,6 +81,20 @@ export class UpstashStore implements Store {
   async setHoldings(userId: string, holdings: PortfolioHolding[]): Promise<void> {
     await this.ensureUserSeeded(userId);
     await this.redis.set(KEY_HOLDINGS(userId), JSON.stringify(holdings));
+  }
+
+  async getCash(userId: string): Promise<CashHolding[]> {
+    await this.ensureUserSeeded(userId);
+    // No backfill on the cash key — if it's missing (legacy users from
+    // before the cash field shipped) we return an empty array. Lazy
+    // upgrade: setCash will create the key on the first write.
+    const raw = await this.redis.get<string | CashHolding[]>(KEY_CASH(userId));
+    return parseArray<CashHolding>(raw, []);
+  }
+
+  async setCash(userId: string, cash: CashHolding[]): Promise<void> {
+    await this.ensureUserSeeded(userId);
+    await this.redis.set(KEY_CASH(userId), JSON.stringify(cash));
   }
 
   async getLastSentiment(userId: string, ticker: string): Promise<StockSentiment | null> {

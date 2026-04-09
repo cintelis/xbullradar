@@ -8,7 +8,7 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { PortfolioHolding, StockSentiment } from '@/types';
+import type { CashHolding, PortfolioHolding, StockSentiment } from '@/types';
 import type { Store, UserData } from './store-types';
 import { DEFAULT_USER_DATA } from './store-types';
 
@@ -24,6 +24,7 @@ function cloneDefaultUserData(): UserData {
   return {
     watchlist: [...DEFAULT_USER_DATA.watchlist],
     holdings: DEFAULT_USER_DATA.holdings.map((h) => ({ ...h })),
+    cash: [],
     lastSentiment: {},
   };
 }
@@ -68,6 +69,10 @@ export class JsonFileStore implements Store {
   /**
    * Returns the user's data slot, creating it with defaults if it doesn't
    * exist yet. Caller must persist after mutation.
+   *
+   * Also fills in any missing fields on legacy users (e.g. existing on-
+   * disk records that predate the `cash` field) so callers can assume the
+   * full UserData shape.
    */
   private async ensureUser(userId: string): Promise<UserData> {
     const data = await this.load();
@@ -75,7 +80,11 @@ export class JsonFileStore implements Store {
       data.users[userId] = cloneDefaultUserData();
       await this.persist();
     }
-    return data.users[userId];
+    const user = data.users[userId];
+    // Backfill fields added after the original schema. Don't persist on
+    // read — let the next mutation save the upgraded shape.
+    if (!Array.isArray(user.cash)) user.cash = [];
+    return user;
   }
 
   async getWatchlist(userId: string): Promise<string[]> {
@@ -97,6 +106,17 @@ export class JsonFileStore implements Store {
   async setHoldings(userId: string, holdings: PortfolioHolding[]): Promise<void> {
     const user = await this.ensureUser(userId);
     user.holdings = holdings.map((h) => ({ ...h }));
+    await this.persist();
+  }
+
+  async getCash(userId: string): Promise<CashHolding[]> {
+    const user = await this.ensureUser(userId);
+    return user.cash.map((c) => ({ ...c }));
+  }
+
+  async setCash(userId: string, cash: CashHolding[]): Promise<void> {
+    const user = await this.ensureUser(userId);
+    user.cash = cash.map((c) => ({ ...c }));
     await this.persist();
   }
 

@@ -5,7 +5,7 @@
 // and last-sentiment map. New users are seeded with DEFAULT_USER_DATA on
 // first access.
 
-import type { PortfolioHolding, StockSentiment } from '@/types';
+import type { CashHolding, PortfolioHolding, StockSentiment } from '@/types';
 
 export interface Store {
   getWatchlist(userId: string): Promise<string[]>;
@@ -13,6 +13,15 @@ export interface Store {
 
   getHoldings(userId: string): Promise<PortfolioHolding[]>;
   setHoldings(userId: string, holdings: PortfolioHolding[]): Promise<void>;
+
+  /**
+   * Non-equity entries — cash, stablecoins, bonds, anything that isn't a
+   * tradeable ticker. Stored separately from `holdings` so the equity
+   * table doesn't have to special-case rows without prices, and so the
+   * cron / sentiment scan can keep iterating tickers without filtering.
+   */
+  getCash(userId: string): Promise<CashHolding[]>;
+  setCash(userId: string, cash: CashHolding[]): Promise<void>;
 
   getLastSentiment(userId: string, ticker: string): Promise<StockSentiment | null>;
   setLastSentiment(userId: string, sentiment: StockSentiment): Promise<void>;
@@ -35,17 +44,18 @@ export interface Store {
 export interface UserData {
   watchlist: string[];
   holdings: PortfolioHolding[];
+  cash: CashHolding[];
   lastSentiment: Record<string, StockSentiment>;
 }
 
 /**
  * Default seed for any new user. Pre-populates the watchlist so the
- * dashboard isn't empty on first sign-in. Holdings start empty — the
- * PortfolioOverview component is hidden until a real holdings input UI
- * exists (Phase 2).
+ * dashboard isn't empty on first sign-in. Holdings + cash start empty —
+ * the user adds them through the UI.
  */
 export const DEFAULT_USER_DATA: UserData = {
   watchlist: ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'META', 'GOOG'],
   holdings: [],
+  cash: [],
   lastSentiment: {},
 };

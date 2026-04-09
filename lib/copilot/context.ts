@@ -27,13 +27,14 @@ import {
  * portfolio adds ~1k tokens to each conversational turn — cheap on Grok 4.
  */
 export async function loadPortfolioContext(userId: string): Promise<string | null> {
-  const [holdings, sentimentMap, prices] = await Promise.all([
+  const [holdings, cash, sentimentMap, prices] = await Promise.all([
     store.getHoldings(userId),
+    store.getCash(userId),
     store.getAllLastSentiments(userId),
     getDailyPrices().catch(() => null),
   ]);
 
-  if (holdings.length === 0) return null;
+  if (holdings.length === 0 && cash.length === 0) return null;
 
   const enriched = await Promise.all(
     holdings.map(async (h) => {
@@ -73,19 +74,34 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
     return bv - av;
   });
 
-  let totalValue = 0;
+  let totalEquityValue = 0;
   for (const r of enriched) {
-    if (r.close != null) totalValue += r.close * r.shares;
+    if (r.close != null) totalEquityValue += r.close * r.shares;
   }
+  let totalCashValue = 0;
+  for (const c of cash) totalCashValue += c.amount;
+  const totalValue = totalEquityValue + totalCashValue;
 
   const lines: string[] = [];
   lines.push('## Current portfolio snapshot');
   lines.push('');
   if (totalValue > 0) {
     lines.push(`Total portfolio value: $${formatNum(totalValue)}`);
+    if (totalCashValue > 0 && totalEquityValue > 0) {
+      const equityPct = (totalEquityValue / totalValue) * 100;
+      const cashPct = (totalCashValue / totalValue) * 100;
+      lines.push(
+        `Allocation: ${equityPct.toFixed(0)}% equity, ${cashPct.toFixed(0)}% cash & equivalents`,
+      );
+    }
     lines.push('');
   }
-  lines.push('Holdings (sorted by position value):');
+
+  if (enriched.length === 0) {
+    lines.push('Equity holdings: none');
+  } else {
+    lines.push('Equity holdings (sorted by position value):');
+  }
   for (const r of enriched) {
     const value = r.close != null ? r.close * r.shares : null;
     const pct = value != null && totalValue > 0 ? (value / totalValue) * 100 : null;
@@ -117,6 +133,18 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
     lines.push(
       `  P/E ${peStr}, ERP ${erpStr}, Fund ${fundStr}, Tech ${techStr}, sentiment ${sentStr}, ${earningsStr}${beatStr}`,
     );
+  }
+
+  if (cash.length > 0) {
+    lines.push('');
+    lines.push('Cash & equivalents (treated as ERP=0, ~risk-free rate):');
+    for (const c of cash) {
+      const pct = totalValue > 0 ? (c.amount / totalValue) * 100 : null;
+      const pctStr = pct != null ? ` (${pct.toFixed(1)}% of book)` : '';
+      lines.push(
+        `- ${c.label} [${c.category}]: $${formatNum(c.amount)}${pctStr}`,
+      );
+    }
   }
 
   return lines.join('\n');

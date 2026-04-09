@@ -11,7 +11,7 @@
 // Polygon Stocks Basic free tier — end-of-day prices only, NOT real-time.
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { Plus, Wallet, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Coins, Plus, Wallet, X } from 'lucide-react';
 import {
   CombinedBadge,
   SignalBadge,
@@ -26,14 +26,21 @@ import {
   type NextEarnings,
 } from '@/components/dashboard/EarningsBadge';
 import { ERPBadge } from '@/components/dashboard/ERPBadge';
-import type { EnrichedPortfolioHolding } from '@/types';
+import type {
+  CashCategory,
+  CashHolding,
+  EnrichedPortfolioHolding,
+} from '@/types';
 
 const TICKER_PATTERN = /^[A-Z]{1,10}$/;
 
 interface PortfolioApiResponse {
   holdings: EnrichedPortfolioHolding[];
+  cash: CashHolding[];
   totals: {
     value: number | null;
+    equityValue: number | null;
+    cashValue: number;
     dayChangeAmount: number | null;
     dayChangePercent: number | null;
     weightedSentiment: number | null;
@@ -69,9 +76,18 @@ interface EarningsApiResponse {
 
 const EMPTY_TOTALS: PortfolioApiResponse['totals'] = {
   value: null,
+  equityValue: null,
+  cashValue: 0,
   dayChangeAmount: null,
   dayChangePercent: null,
   weightedSentiment: null,
+};
+
+const CASH_CATEGORY_LABELS: Record<CashCategory, string> = {
+  cash: 'Cash',
+  stablecoin: 'Stablecoin',
+  bond: 'Bond',
+  other: 'Other',
 };
 
 interface RowState {
@@ -86,6 +102,7 @@ interface RowState {
 
 export default function PortfolioView() {
   const [rows, setRows] = useState<RowState[]>([]);
+  const [cash, setCash] = useState<CashHolding[]>([]);
   const [totals, setTotals] = useState<PortfolioApiResponse['totals']>(EMPTY_TOTALS);
   const [pricesAsOfDate, setPricesAsOfDate] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -95,6 +112,20 @@ export default function PortfolioView() {
   const [newTicker, setNewTicker] = useState('');
   const [newShares, setNewShares] = useState('');
   const tickerInputRef = useRef<HTMLInputElement>(null);
+
+  // Cash & equivalents collapsible section state. Defaults to collapsed
+  // so the section doesn't add visual clutter for users who haven't yet
+  // added any cash entries — but auto-expands ONCE on the initial load
+  // if we see a non-empty cash array. After that the user is in control,
+  // tracked via the cashAutoExpandedRef so a refresh after editing
+  // doesn't re-pop the section open.
+  const [cashExpanded, setCashExpanded] = useState(false);
+  const cashAutoExpandedRef = useRef(false);
+  const [addingCash, setAddingCash] = useState(false);
+  const [newCashLabel, setNewCashLabel] = useState('');
+  const [newCashAmount, setNewCashAmount] = useState('');
+  const [newCashCategory, setNewCashCategory] = useState<CashCategory>('cash');
+  const cashLabelInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch /api/portfolio + /api/technicals + /api/fundamentals in parallel
   // and merge all three into row state.
@@ -170,6 +201,17 @@ export default function PortfolioView() {
     });
 
     setRows(merged);
+    setCash(portfolio.cash ?? []);
+    if (
+      !cashAutoExpandedRef.current &&
+      (portfolio.cash ?? []).length > 0
+    ) {
+      // First load with existing cash entries → auto-expand once. After
+      // this fires, cashAutoExpandedRef stays true so subsequent
+      // refreshAll calls don't fight the user's manual toggle.
+      cashAutoExpandedRef.current = true;
+      setCashExpanded(true);
+    }
     setTotals(portfolio.totals ?? EMPTY_TOTALS);
     setPricesAsOfDate(portfolio.pricesAsOfDate ?? null);
   }, []);
@@ -247,6 +289,89 @@ export default function PortfolioView() {
     }
   }
 
+  // Replace the entire cash array server-side, then refetch.
+  async function updateCash(next: CashHolding[]): Promise<void> {
+    setMutating(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/portfolio', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cash: next }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      await refreshAll();
+    } catch (err) {
+      setError((err as Error).message);
+      throw err;
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function addCashEntry(e: FormEvent) {
+    e.preventDefault();
+    const label = newCashLabel.trim();
+    const amount = Number(newCashAmount.trim());
+
+    if (!label) {
+      setError('Cash entry needs a label.');
+      return;
+    }
+    if (!Number.isFinite(amount) || amount < 0) {
+      setError('Cash amount must be a non-negative number.');
+      return;
+    }
+
+    const next: CashHolding[] = [
+      ...cash,
+      {
+        // Random id is fine — we don't need cryptographic uniqueness, just
+        // a stable React key + a way to address the entry on remove.
+        id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        label,
+        amount,
+        category: newCashCategory,
+      },
+    ];
+    try {
+      await updateCash(next);
+      setNewCashLabel('');
+      setNewCashAmount('');
+      // Keep the same category selected so adding multiple stablecoin
+      // entries in a row doesn't require re-picking the dropdown.
+      cashLabelInputRef.current?.focus();
+    } catch {
+      // surfaced via setError
+    }
+  }
+
+  async function removeCashEntry(id: string) {
+    const next = cash.filter((c) => c.id !== id);
+    try {
+      await updateCash(next);
+    } catch {
+      // surfaced via setError
+    }
+  }
+
+  function startAddingCash() {
+    setAddingCash(true);
+    setCashExpanded(true);
+    setError(null);
+    setTimeout(() => cashLabelInputRef.current?.focus(), 0);
+  }
+
+  function cancelAddingCash() {
+    setAddingCash(false);
+    setNewCashLabel('');
+    setNewCashAmount('');
+    setError(null);
+  }
+
   function startAdding() {
     setAdding(true);
     setError(null);
@@ -293,8 +418,8 @@ export default function PortfolioView() {
           your equity exposure as a whole is well-compensated vs holding
           treasuries. Same thresholds as the per-stock ERP badge:
           > 4% CHEAP, 2-4% FAIR, < 2% RICH. */}
-      {rows.length > 0 && totals.value != null && (() => {
-        const portfolioERP = computeWeightedErp(rows);
+      {(rows.length > 0 || cash.length > 0) && totals.value != null && (() => {
+        const portfolioERP = computeWeightedErp(rows, cash);
         return (
           <div className="mb-4 grid grid-cols-2 gap-3 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-3 md:grid-cols-4">
             <Totals label="Total value" value={formatCurrency(totals.value)} />
@@ -401,10 +526,10 @@ export default function PortfolioView() {
 
       {loading ? (
         <p className="text-sm text-zinc-500">Loading…</p>
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && cash.length === 0 ? (
         <p className="text-sm text-zinc-500">
           Your portfolio is empty. Click <Plus className="inline h-3 w-3" /> above to
-          add a holding.
+          add a holding, or open the Cash & Equivalents section below to add cash.
         </p>
       ) : (
         <>
@@ -609,7 +734,33 @@ export default function PortfolioView() {
         </>
       )}
 
-      {rows.length > 0 && (
+      {/* Cash & Equivalents — collapsible section. Always rendered (even
+          when empty) so the user has a clear way to start adding cash.
+          Defaults collapsed; auto-expands if there are existing entries
+          (handled in refreshAll). */}
+      <CashSection
+        cash={cash}
+        expanded={cashExpanded}
+        onToggle={() => setCashExpanded((v) => !v)}
+        adding={addingCash}
+        mutating={mutating}
+        loading={loading}
+        newCashLabel={newCashLabel}
+        newCashAmount={newCashAmount}
+        newCashCategory={newCashCategory}
+        labelInputRef={cashLabelInputRef}
+        onLabelChange={setNewCashLabel}
+        onAmountChange={setNewCashAmount}
+        onCategoryChange={setNewCashCategory}
+        onStartAdding={startAddingCash}
+        onCancelAdding={cancelAddingCash}
+        onSubmit={addCashEntry}
+        onRemove={removeCashEntry}
+        totalCashValue={totals.cashValue}
+        totalValue={totals.value}
+      />
+
+      {(rows.length > 0 || cash.length > 0) && (
         <p className="mt-3 text-[11px] text-zinc-600">
           Prices are end-of-day from Polygon, not real-time. Sentiment is from Grok x_search.
           Technical signal aggregates SMA, EMA, RSI, MACD, and Bollinger Bands. Fundamental
@@ -649,16 +800,250 @@ function Totals({
 }
 
 /**
- * Value-weighted Equity Risk Premium across the portfolio. Returns null
- * if no holding has both a known position value AND a known ERP. Mirrors
- * the weightedSentiment math computed server-side in /api/portfolio.
+ * Value-weighted Equity Risk Premium across the portfolio.
  *
- * Holdings without a P/E (e.g. ETFs, unprofitable companies, or names
- * still warming the fundamentals cache) are excluded from BOTH the
- * numerator and the denominator — so the resulting average is over the
- * subset of the portfolio for which ERP is actually defined.
+ * Equity holdings contribute their value × ERP to the numerator and value
+ * to the denominator (only when ERP is defined — names with no P/E are
+ * skipped from both sides).
+ *
+ * Cash entries contribute 0 to the numerator (cash earns approximately
+ * the risk-free rate, so its ERP is ~0) but their full value to the
+ * denominator. This is the right behaviour: a cash-heavy portfolio
+ * shows a diluted ERP that correctly reflects "you're not actually
+ * being compensated for risk on most of your book".
+ *
+ * Returns null if both denominators are zero (no equity with ERP and
+ * no cash).
  */
-function computeWeightedErp(rows: RowState[]): number | null {
+// ─── Cash & Equivalents collapsible section ─────────────────────────────
+
+interface CashSectionProps {
+  cash: CashHolding[];
+  expanded: boolean;
+  onToggle: () => void;
+  adding: boolean;
+  mutating: boolean;
+  loading: boolean;
+  newCashLabel: string;
+  newCashAmount: string;
+  newCashCategory: CashCategory;
+  labelInputRef: React.RefObject<HTMLInputElement | null>;
+  onLabelChange: (v: string) => void;
+  onAmountChange: (v: string) => void;
+  onCategoryChange: (v: CashCategory) => void;
+  onStartAdding: () => void;
+  onCancelAdding: () => void;
+  onSubmit: (e: FormEvent) => void;
+  onRemove: (id: string) => void;
+  totalCashValue: number;
+  totalValue: number | null;
+}
+
+function CashSection(props: CashSectionProps) {
+  const {
+    cash,
+    expanded,
+    onToggle,
+    adding,
+    mutating,
+    loading,
+    newCashLabel,
+    newCashAmount,
+    newCashCategory,
+    labelInputRef,
+    onLabelChange,
+    onAmountChange,
+    onCategoryChange,
+    onStartAdding,
+    onCancelAdding,
+    onSubmit,
+    onRemove,
+    totalCashValue,
+    totalValue,
+  } = props;
+
+  const cashAllocPct =
+    totalValue != null && totalValue > 0 && totalCashValue > 0
+      ? (totalCashValue / totalValue) * 100
+      : null;
+
+  return (
+    <div className="mt-4 rounded-lg border border-zinc-800/60 bg-zinc-900/30">
+      {/* Collapsible header — click anywhere on the row toggles expand. */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-zinc-900/50"
+        aria-expanded={expanded}
+      >
+        <div className="flex items-center gap-2">
+          <Coins className="h-4 w-4 text-amber-500" />
+          <span className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Cash & Equivalents
+          </span>
+          {cash.length > 0 && (
+            <span className="rounded-full bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+              {cash.length}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {totalCashValue > 0 && (
+            <span className="font-mono text-xs text-zinc-300">
+              {formatCurrency(totalCashValue)}
+              {cashAllocPct != null && (
+                <span className="ml-1 text-zinc-600">
+                  ({cashAllocPct.toFixed(0)}%)
+                </span>
+              )}
+            </span>
+          )}
+          {expanded ? (
+            <ChevronUp className="h-4 w-4 text-zinc-500" />
+          ) : (
+            <ChevronDown className="h-4 w-4 text-zinc-500" />
+          )}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-zinc-800/60 p-4">
+          {/* Add row + add form */}
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-xs text-zinc-500">
+              Cash, stablecoins, bond holdings, or anything that earns roughly the
+              risk-free rate.
+            </p>
+            {!adding && (
+              <button
+                type="button"
+                onClick={onStartAdding}
+                disabled={mutating || loading}
+                title="Add cash entry"
+                aria-label="Add cash entry"
+                className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+
+          {adding && (
+            <form onSubmit={onSubmit} className="mb-3 flex flex-wrap items-center gap-2">
+              <input
+                ref={labelInputRef}
+                type="text"
+                value={newCashLabel}
+                onChange={(e) => onLabelChange(e.target.value)}
+                placeholder="Label (e.g. Schwab brokerage)"
+                title="Where this cash lives — for your own reference."
+                disabled={mutating}
+                maxLength={60}
+                className="min-w-40 flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
+              />
+              <input
+                type="number"
+                value={newCashAmount}
+                onChange={(e) => onAmountChange(e.target.value)}
+                placeholder="Amount in USD"
+                title="USD value of this entry."
+                disabled={mutating}
+                min={0}
+                step="any"
+                className="w-36 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
+              />
+              <select
+                value={newCashCategory}
+                onChange={(e) => onCategoryChange(e.target.value as CashCategory)}
+                disabled={mutating}
+                title="Category — for grouping in the export and the bot snapshot."
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none disabled:opacity-50"
+              >
+                <option value="cash">Cash</option>
+                <option value="stablecoin">Stablecoin</option>
+                <option value="bond">Bond</option>
+                <option value="other">Other</option>
+              </select>
+              <button
+                type="submit"
+                disabled={mutating || !newCashLabel.trim() || !newCashAmount.trim()}
+                className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Add
+              </button>
+              <button
+                type="button"
+                onClick={onCancelAdding}
+                disabled={mutating}
+                className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed"
+                aria-label="Cancel"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </form>
+          )}
+
+          {cash.length === 0 ? (
+            <p className="text-xs text-zinc-600">
+              No cash entries yet. Add one to dilute the Portfolio ERP correctly
+              and give the chat bot a complete picture of your allocation.
+            </p>
+          ) : (
+            <ul className="divide-y divide-zinc-800/50">
+              {cash.map((c) => {
+                const pct =
+                  totalValue != null && totalValue > 0
+                    ? (c.amount / totalValue) * 100
+                    : null;
+                return (
+                  <li
+                    key={c.id}
+                    className="group flex items-center justify-between gap-3 py-2 text-sm"
+                  >
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      <span
+                        className="rounded-md border border-zinc-800 bg-zinc-900/60 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-zinc-400"
+                        title={`Category: ${CASH_CATEGORY_LABELS[c.category]}`}
+                      >
+                        {CASH_CATEGORY_LABELS[c.category]}
+                      </span>
+                      <span className="truncate text-zinc-200">{c.label}</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono text-zinc-200">
+                        {formatCurrency(c.amount)}
+                      </span>
+                      {pct != null && (
+                        <span className="font-mono text-xs text-zinc-600">
+                          {pct.toFixed(1)}%
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onRemove(c.id)}
+                        disabled={mutating}
+                        title={`Remove ${c.label}`}
+                        aria-label={`Remove ${c.label}`}
+                        className="rounded p-1 text-zinc-700 opacity-0 transition hover:bg-zinc-900 hover:text-red-400 group-hover:opacity-100 disabled:cursor-not-allowed"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function computeWeightedErp(
+  rows: RowState[],
+  cash: CashHolding[],
+): number | null {
   let numerator = 0;
   let denominator = 0;
   for (const r of rows) {
@@ -666,6 +1051,10 @@ function computeWeightedErp(rows: RowState[]): number | null {
       numerator += r.holding.value * r.equityRiskPremium;
       denominator += r.holding.value;
     }
+  }
+  for (const c of cash) {
+    // Cash contributes 0 × value to numerator (omitted) and value to denominator.
+    denominator += c.amount;
   }
   return denominator > 0 ? numerator / denominator : null;
 }
