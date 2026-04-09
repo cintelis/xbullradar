@@ -26,24 +26,45 @@ import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
-// Bumped to v2 when the symbol list expanded to include major global
-// indexes alongside commodities. Bumping the key invalidates the old
-// cache instantly instead of waiting for the 6h TTL to expire.
-const CACHE_KEY = 'xbr:markets:v2';
+// Bumped to v4 when treasury yields (2Y, 10Y, 30Y) were added via the
+// new /stable/treasury-rates endpoint. The futures price tickers
+// ZNUSD/ZBUSD were removed since the actual yields are more meaningful
+// than futures positioning for casual users. Bumping the key invalidates
+// the old cache instantly instead of waiting for the 6h TTL to expire.
+const CACHE_KEY = 'xbr:markets:v4';
 const CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
 /**
- * Instruments we ticker-tape across the top of the dashboard. Mix of
- * major global stock indexes (S&P 500, Nasdaq, Dow, FTSE, Nikkei, Hang
- * Seng), key commodities (metals, energy), and Treasury futures.
+ * Instruments we ticker-tape across the top of the dashboard. Mix of:
+ *   - Major global stock indexes (US: S&P / Nasdaq / Dow, Global: FTSE / Nikkei / Hang Seng)
+ *   - Crypto (Bitcoin, Ethereum)
+ *   - Forex pairs (EUR / GBP / JPY against USD)
+ *   - Key commodities (metals + energy)
+ *   - Treasury futures (10Y / 30Y notes/bonds)
  *
- * Order: most-watched US indexes first, then global indexes, then
- * commodities, then bonds. Reads as a "global market summary" left-to-right.
+ * Order: indexes → crypto → forex → metals → energy → bonds. Reads
+ * as a "global market summary" left-to-right with the most-watched
+ * benchmarks (S&P/Nasdaq/Dow) leading.
  *
- * Two notable indexes excluded due to FMP free-tier coverage gaps:
- *   - ^GDAXI (DAX 40 / Germany) — premium endpoint
- *   - ^AXJO (ASX 200 / Australia) — premium endpoint
- * Re-add when/if upgrading to FMP Stocks Starter ($14/mo).
+ * NOT in the list — premium-gated even on FMP Stocks Starter ($14/mo):
+ *
+ * Indexes:
+ *   - ^GDAXI (DAX 40 / Germany)
+ *   - ^AXJO (ASX 200 / Australia)
+ *   - DXUSD (US Dollar Index)
+ *   - RTYUSD (Russell 2000 micro futures)
+ *   - YMUSD (Mini Dow Jones futures)
+ *
+ * Agricultural futures (verified all blocked on Starter — directly
+ * tested 2026-04-09):
+ *   - ZSUSX (Soybeans), KEUSX (Wheat), ZCUSX (Corn), SBUSX (Sugar)
+ *   - KCUSX (Coffee), CCUSD (Cocoa), CTUSX (Cotton), OJUSX (Orange Juice)
+ *
+ * Specialty metals (also blocked on Starter):
+ *   - PAUSD (Palladium), PLUSD (Platinum)
+ *
+ * All of the above need FMP Stocks Pro or higher. Add them back if
+ * the FMP plan ever upgrades.
  *
  * NOTE: ^N225 returns "Nikkei 225" which is the index, not the JPX
  * exchange. The exchange hours pill (right side of MarketStrip) covers
@@ -58,6 +79,13 @@ const INSTRUMENT_SYMBOLS: Array<{ symbol: string; label: string }> = [
   { symbol: '^FTSE', label: 'FTSE 100' },
   { symbol: '^N225', label: 'NIKKEI' },
   { symbol: '^HSI', label: 'HANG SENG' },
+  // Crypto
+  { symbol: 'BTCUSD', label: 'BTC' },
+  { symbol: 'ETHUSD', label: 'ETH' },
+  // Forex (major pairs against USD)
+  { symbol: 'EURUSD', label: 'EUR/USD' },
+  { symbol: 'GBPUSD', label: 'GBP/USD' },
+  { symbol: 'JPYUSD', label: 'JPY/USD' },
   // Metals
   { symbol: 'GCUSD', label: 'GOLD' },
   { symbol: 'SIUSD', label: 'SILVER' },
@@ -66,9 +94,11 @@ const INSTRUMENT_SYMBOLS: Array<{ symbol: string; label: string }> = [
   { symbol: 'CLUSD', label: 'WTI OIL' },
   { symbol: 'BZUSD', label: 'BRENT' },
   { symbol: 'NGUSD', label: 'NAT GAS' },
-  // Bonds
-  { symbol: 'ZNUSD', label: '10Y NOTE' },
-  { symbol: 'ZBUSD', label: '30Y BOND' },
+  // Treasury yields are fetched separately via /stable/treasury-rates
+  // (see fetchTreasuryYields below). They get appended to the result
+  // of fetchAllCommodities() in fetchAllInstruments(). The bond futures
+  // (ZNUSD, ZBUSD) were removed in v4 because the actual yields are
+  // more meaningful for casual users than the futures positioning.
 ];
 
 export interface CommodityQuote {
@@ -79,6 +109,13 @@ export interface CommodityQuote {
   change: number;
   changePercent: number;
   previousClose: number | null;
+  /**
+   * How the price should be rendered in the ticker tape. Default 'usd'
+   * renders as "$1,234.56". 'percent' renders as "4.29%" — used for
+   * treasury yields where the value IS itself a percentage and a "$"
+   * prefix would be misleading.
+   */
+  unit?: 'usd' | 'percent';
 }
 
 export interface ExchangeHours {
@@ -158,10 +195,10 @@ async function fetchCommodityQuote(
 }
 
 /**
- * Fetch all instrument quotes sequentially. ~200ms per quote × 14 = ~3s
- * total cold-cache cost. Hot cache is instant. Failures don't break the
- * whole batch — missing symbols just get omitted from the result so a
- * single broken ticker doesn't take down the whole strip.
+ * Fetch all instrument quotes sequentially. ~200ms per quote × N = a few
+ * seconds total cold-cache cost. Hot cache is instant. Failures don't
+ * break the whole batch — missing symbols just get omitted from the
+ * result so a single broken ticker doesn't take down the whole strip.
  */
 async function fetchAllCommodities(): Promise<CommodityQuote[]> {
   const out: CommodityQuote[] = [];
@@ -174,6 +211,112 @@ async function fetchAllCommodities(): Promise<CommodityQuote[]> {
     }
   }
   return out;
+}
+
+// ─── Treasury yields (separate endpoint, full yield curve in one call) ──────
+
+interface FMPTreasuryRate {
+  date: string;
+  month1?: number;
+  month2?: number;
+  month3?: number;
+  month6?: number;
+  year1?: number;
+  year2?: number;
+  year3?: number;
+  year5?: number;
+  year7?: number;
+  year10?: number;
+  year20?: number;
+  year30?: number;
+}
+
+/**
+ * Treasury yield curve points to surface in the ticker tape. The
+ * /stable/treasury-rates endpoint returns the entire curve in one call,
+ * so adding more maturities here costs us nothing. Picked the three
+ * most-watched: 2Y (Fed proxy), 10Y (benchmark), 30Y (long bond).
+ */
+const TREASURY_YIELD_POINTS: Array<{
+  key: keyof FMPTreasuryRate;
+  symbol: string;
+  label: string;
+  name: string;
+}> = [
+  { key: 'year2', symbol: 'US2Y', label: '2Y YIELD', name: 'US 2-Year Treasury Yield' },
+  { key: 'year10', symbol: 'US10Y', label: '10Y YIELD', name: 'US 10-Year Treasury Yield' },
+  { key: 'year30', symbol: 'US30Y', label: '30Y YIELD', name: 'US 30-Year Treasury Yield' },
+];
+
+/**
+ * Fetch treasury yields via /stable/treasury-rates and convert into the
+ * shared CommodityQuote shape. The endpoint returns multiple historical
+ * days, so we use the latest day for the current value and the day
+ * before for the previous-close comparison.
+ *
+ * One API call returns the entire yield curve for the past ~60 days.
+ * Trivial cost compared to per-symbol /quote fetches.
+ */
+async function fetchTreasuryYields(): Promise<CommodityQuote[]> {
+  const apiKey = encodeURIComponent(getApiKey());
+  const url = `${FMP_API_BASE}/treasury-rates?limit=2&apikey=${apiKey}`;
+
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    console.warn(`[markets] treasury-rates returned ${res.status}`);
+    return [];
+  }
+
+  const json = (await res.json()) as unknown;
+  if (!Array.isArray(json) || json.length === 0) return [];
+
+  const rates = json as FMPTreasuryRate[];
+  const latest = rates[0];
+  const previous = rates.length >= 2 ? rates[1] : null;
+  if (!latest) return [];
+
+  const out: CommodityQuote[] = [];
+  for (const point of TREASURY_YIELD_POINTS) {
+    const current = latest[point.key];
+    if (typeof current !== 'number') continue;
+    const prev = previous?.[point.key];
+    const prevValue = typeof prev === 'number' ? prev : null;
+    const change = prevValue != null ? current - prevValue : 0;
+    const changePercent = prevValue != null && prevValue !== 0 ? (change / prevValue) * 100 : 0;
+
+    out.push({
+      symbol: point.symbol,
+      label: point.label,
+      name: point.name,
+      price: current,
+      change,
+      changePercent,
+      previousClose: prevValue,
+      unit: 'percent',
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Fetch ALL ticker-tape instruments: /quote-based commodities/indexes/
+ * crypto/forex AND /stable/treasury-rates yields. Runs the two fetches
+ * in parallel since they hit different endpoints.
+ */
+async function fetchAllInstruments(): Promise<CommodityQuote[]> {
+  const [commodities, yields] = await Promise.all([
+    fetchAllCommodities(),
+    fetchTreasuryYields().catch((err) => {
+      console.warn('[markets] treasury-rates fetch failed:', err);
+      return [] as CommodityQuote[];
+    }),
+  ]);
+  return [...commodities, ...yields];
 }
 
 interface FMPExchangeHoursResult {
@@ -265,9 +408,10 @@ export async function getMarkets(): Promise<MarketsCache> {
       if (parsed) return parsed;
     }
 
-    // Cache miss — fetch fresh
+    // Cache miss — fetch fresh. fetchAllInstruments combines /quote
+    // commodities/indexes/crypto/forex and /stable/treasury-rates yields.
     const [commodities, exchanges] = await Promise.all([
-      fetchAllCommodities(),
+      fetchAllInstruments(),
       fetchExchangeHours(),
     ]);
     const fresh: MarketsCache = {

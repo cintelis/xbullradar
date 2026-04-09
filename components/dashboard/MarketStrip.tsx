@@ -21,6 +21,8 @@ interface CommodityQuote {
   change: number;
   changePercent: number;
   previousClose: number | null;
+  /** 'percent' renders the price as "4.29%" instead of "$4.29" — used for treasury yields */
+  unit?: 'usd' | 'percent';
 }
 
 interface MarketsApiResponse {
@@ -105,11 +107,14 @@ function TickerItem({ item }: { item: CommodityQuote }) {
       ? 'text-red-400'
       : 'text-zinc-400';
   const arrow = isUp ? '▲' : isDown ? '▼' : '—';
+  const isPercentUnit = item.unit === 'percent';
 
   return (
     <div className="flex shrink-0 items-center gap-2 px-4 font-mono">
       <span className="font-semibold text-zinc-300">{item.label}</span>
-      <span className="text-zinc-200">${formatPrice(item.price)}</span>
+      <span className="text-zinc-200">
+        {isPercentUnit ? `${item.price.toFixed(2)}%` : `$${formatPrice(item.price)}`}
+      </span>
       <span className={colorClass}>
         {arrow} {item.changePercent > 0 ? '+' : ''}
         {item.changePercent.toFixed(2)}%
