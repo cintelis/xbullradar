@@ -6,10 +6,19 @@
 // inline by inspecting the assistant message's `ui` field.
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Trash2 } from 'lucide-react';
+import { Send, Trash2, ChevronRight } from 'lucide-react';
 import ActButton from './ActButton';
 import { Button } from '@/components/ui/button';
 import type { CopilotResponse, CopilotUiAction } from '@/types';
+
+interface CopilotChatProps {
+  /**
+   * Optional callback to hide the chat panel. Provided by Dashboard on
+   * desktop where the sidebar can collapse the chat. Mobile chat tab
+   * doesn't pass this — the hide button is hidden when the prop is absent.
+   */
+  onHide?: () => void;
+}
 
 interface ChatMessage {
   id: string;
@@ -28,7 +37,7 @@ const WELCOME_MESSAGE: ChatMessage = {
     "Hi! Ask me about a stock, your portfolio, or what's trending on X right now.",
 };
 
-export default function CopilotChat() {
+export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   // Initial state matches the SSR render — we hydrate from localStorage in
   // an effect to avoid hydration mismatches.
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
@@ -148,16 +157,29 @@ export default function CopilotChat() {
             Powered by Grok · Real-time X sentiment
           </p>
         </div>
-        <button
-          type="button"
-          onClick={clearChat}
-          disabled={loading || messages.length <= 1}
-          title="Clear conversation"
-          aria-label="Clear conversation"
-          className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
-        >
-          <Trash2 className="h-4 w-4" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={clearChat}
+            disabled={loading || messages.length <= 1}
+            title="Clear conversation"
+            aria-label="Clear conversation"
+            className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+          {onHide && (
+            <button
+              type="button"
+              onClick={onHide}
+              title="Hide chat"
+              aria-label="Hide chat"
+              className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 space-y-4 overflow-auto p-4">
