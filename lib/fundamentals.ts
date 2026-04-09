@@ -26,22 +26,22 @@
 import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 import type { Signal } from './technicals';
+import { getEarnings, getEarningsBeatRate } from './earnings';
 
 const FMP_API_BASE = 'https://financialmodelingprep.com/stable';
 const CACHE_TTL_SECONDS = 48 * 60 * 60; // 48 hours
-// Bumped to v2 when the FMP plan upgraded from Basic → Starter, which
-// unlocked coverage for small-cap and ETF tickers (ITRI, QBTS, OKLO,
-// BUG) that were returning "Premium Query Parameter" errors on Basic
-// and getting cached as null. Bumping the key forces a fresh fetch on
-// the next read so the new tier coverage takes effect immediately
-// instead of waiting up to 48h for the old TTL to expire.
-const FUND_KEY = (ticker: string) => `xbr:fundamentals:v2:${ticker}`;
+// Bumped to v3 when the consistency (earnings beat/miss) bucket was
+// added to the signal aggregation. The cached signal shape changed —
+// old v2 entries don't have the new indicator field — so the key bump
+// forces a fresh recompute on next read instead of stale cache hits.
+const FUND_KEY = (ticker: string) => `xbr:fundamentals:v3:${ticker}`;
 
 export interface FundamentalIndicators {
   valuation: Signal;     // P/E, P/B, P/S — is the stock cheap or expensive?
   profitability: Signal; // ROE, net margin — does the business make money?
   growth: Signal;        // Revenue growth, EPS growth — is it expanding?
   health: Signal;        // Debt/equity, current ratio, FCF — will it survive?
+  consistency: Signal;   // Earnings beat/miss track record — does it execute reliably?
 }
 
 export interface FundamentalSignal {
@@ -60,6 +60,8 @@ export interface FundamentalSignal {
     debtToEquity: number | null;
     currentRatio: number | null;
     freeCashFlow: number | null;
+    /** Fraction of last 4 quarters that beat consensus, 0..1 */
+    earningsBeatRate: number | null;
   };
   /** ISO timestamp of when this data was fetched from FMP. */
   fetchedAt: string;
@@ -298,15 +300,37 @@ function healthSignal(metrics: FMPKeyMetricsTTM, ratios: FMPRatiosTTM): Signal {
 
 // ─── Aggregation ────────────────────────────────────────────────────────────
 
+/**
+ * Earnings consistency: did the company beat consensus more often than
+ * not over the last 4 quarters? Companies that consistently beat are
+ * usually executing well; consistent missers are struggling.
+ *
+ *   beatRate >= 0.75 → BUY  (3 of 4 or 4 of 4 beats)
+ *   beatRate <= 0.25 → SELL (1 of 4 or 0 of 4 beats)
+ *   otherwise        → NEUTRAL
+ *
+ * Returns NEUTRAL if there isn't enough history (need at least 2
+ * reported quarters), or if FMP doesn't have earnings data for the
+ * ticker (e.g., ETFs, recent IPOs).
+ */
+function consistencySignal(beatRate: number | null): Signal {
+  if (beatRate == null) return 'NEUTRAL';
+  if (beatRate >= 0.75) return 'BUY';
+  if (beatRate <= 0.25) return 'SELL';
+  return 'NEUTRAL';
+}
+
 function aggregate(
   metrics: FMPKeyMetricsTTM,
   ratios: FMPRatiosTTM,
+  beatRate: number | null,
 ): FundamentalSignal {
   const indicators: FundamentalIndicators = {
     valuation: valuationSignal(ratios),
     profitability: profitabilitySignal(metrics, ratios),
     growth: growthSignal(ratios),
     health: healthSignal(metrics, ratios),
+    consistency: consistencySignal(beatRate),
   };
 
   let buys = 0;
@@ -318,17 +342,17 @@ function aggregate(
     else neutrals += 1;
   }
 
-  // Majority of 4: 3+ wins. Otherwise NEUTRAL.
+  // Majority of 5: 3+ wins. Otherwise NEUTRAL.
   let signal: Signal = 'NEUTRAL';
   let confidence = 0;
   if (buys >= 3) {
     signal = 'BUY';
-    confidence = buys / 4;
+    confidence = buys / 5;
   } else if (sells >= 3) {
     signal = 'SELL';
-    confidence = sells / 4;
+    confidence = sells / 5;
   } else {
-    confidence = neutrals / 4;
+    confidence = neutrals / 5;
   }
 
   return {
@@ -341,10 +365,11 @@ function aggregate(
       priceToSales: ratios.priceToSalesRatioTTM ?? null,
       roe: metrics.returnOnEquityTTM ?? null,
       netMargin: ratios.netProfitMarginTTM ?? null,
-      revenueGrowth: null, // not exposed by TTM endpoints — v1.1 with historical
+      revenueGrowth: null, // not exposed by TTM endpoints — Sprint B1 will fix
       debtToEquity: ratios.debtToEquityRatioTTM ?? null,
       currentRatio: metrics.currentRatioTTM ?? null,
       freeCashFlow: metrics.freeCashFlowYieldTTM ?? null, // yield, not per-share
+      earningsBeatRate: beatRate,
     },
     fetchedAt: new Date().toISOString(),
   };
@@ -378,6 +403,11 @@ function parseCached(raw: unknown): FundamentalSignal | null {
  * Get the fundamental signal for a single ticker. Always serves from cache
  * if available; refreshes from FMP on miss with 48h TTL. Returns null if
  * FMP doesn't recognize the ticker.
+ *
+ * On a cache miss this fetches BOTH the FMP fundamentals (key-metrics +
+ * ratios) AND the earnings cache (which itself caches via lib/earnings).
+ * The earnings cache is shared with the portfolio earnings badges, so the
+ * first ticker that computes a fund signal also warms the earnings badge.
  */
 export async function getFundamentalSignal(ticker: string): Promise<FundamentalSignal | null> {
   const upper = ticker.toUpperCase();
@@ -389,10 +419,21 @@ export async function getFundamentalSignal(ticker: string): Promise<FundamentalS
     if (parsed) return parsed;
   }
 
-  const raw = await fetchFundamentalsRaw(upper);
+  // Fetch fundamentals + earnings in parallel. Earnings is non-fatal —
+  // ETFs and some tickers don't have earnings data, in which case the
+  // beat rate is null and the consistency bucket votes NEUTRAL.
+  const [raw, earningsCache] = await Promise.all([
+    fetchFundamentalsRaw(upper),
+    getEarnings(upper).catch((err) => {
+      console.warn(`[fundamentals] earnings fetch failed for ${upper}:`, err);
+      return null;
+    }),
+  ]);
+
   if (!raw) return null;
 
-  const fresh = aggregate(raw.metrics, raw.ratios);
+  const beatRate = getEarningsBeatRate(earningsCache);
+  const fresh = aggregate(raw.metrics, raw.ratios, beatRate);
 
   if (redis) {
     await redis.set(FUND_KEY(upper), JSON.stringify(fresh), { ex: CACHE_TTL_SECONDS });
