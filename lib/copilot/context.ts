@@ -17,6 +17,7 @@ import {
   getNextEarnings,
   getEarningsBeatRate,
 } from '@/lib/earnings';
+import { isOnOndo, getOndoUrl } from '@/lib/ondo';
 
 /**
  * Returns a markdown-formatted portfolio snapshot, or null if the user
@@ -127,11 +128,13 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
         ? ` value $${formatNum(value)}${pct != null ? ` (${pct.toFixed(1)}% of book)` : ''}`
         : '';
 
+    const ondoUrl = getOndoUrl(r.ticker);
+    const ondoStr = ondoUrl ? `, Ondo: ${ondoUrl}` : '';
     lines.push(
       `- ${r.ticker}: ${r.shares} sh${closeStr}${valueStr}${dayStr}`,
     );
     lines.push(
-      `  P/E ${peStr}, ERP ${erpStr}, Fund ${fundStr}, Tech ${techStr}, sentiment ${sentStr}, ${earningsStr}${beatStr}`,
+      `  P/E ${peStr}, ERP ${erpStr}, Fund ${fundStr}, Tech ${techStr}, sentiment ${sentStr}, ${earningsStr}${beatStr}${ondoStr}`,
     );
   }
 
