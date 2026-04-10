@@ -86,7 +86,7 @@ export default function Dashboard({ userEmail }: DashboardProps) {
               {mobileTab === 'portfolio' && <PortfolioView />}
               {mobileTab === 'news' && <NewsPanel />}
               {mobileTab === 'chat' && (
-                <div className="h-[calc(100vh-8.5rem)] overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
+                <div className="h-[calc(100dvh-8.5rem)] overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
                   <CopilotChat />
                 </div>
               )}
