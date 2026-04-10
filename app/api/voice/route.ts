@@ -119,6 +119,27 @@ export async function POST(_request: NextRequest) {
                 additionalProperties: false,
               },
             },
+            {
+              type: 'function',
+              name: 'show_ondo_link',
+              description:
+                'Show a clickable "Act on Ondo Finance" button on the user\'s screen for a specific stock ticker. ' +
+                'Call this when you recommend a stock that is available on Ondo, or when the user asks how to buy/trade a stock. ' +
+                'The button opens the Ondo Finance trading page for the tokenized version of the stock. ' +
+                'Only call for tickers that have an Ondo URL in the portfolio snapshot. Do NOT guess — if you don\'t see an Ondo URL for the ticker, tell the user to check app.ondo.finance directly.',
+              parameters: {
+                type: 'object',
+                properties: {
+                  ticker: {
+                    type: 'string',
+                    description:
+                      'Stock ticker symbol in uppercase, e.g. AMZN, MSFT, NVDA',
+                  },
+                },
+                required: ['ticker'],
+                additionalProperties: false,
+              },
+            },
           ],
         },
       }),

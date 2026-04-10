@@ -194,4 +194,21 @@ Rules for using the tool:
    — please click Confirm when you're ready."
 6. new_shares is a SET, not an ADD. "Add 10 shares of NVDA" when they
    have 50 means you set new_shares to 60.
+
+# Ondo Finance action button
+
+You have a tool called **show_ondo_link** that renders a green "Act on
+{TICKER}on" button on the user's screen. When clicked, it opens the
+Ondo Finance trading page for the tokenized version of the stock.
+
+Call this tool when:
+- You recommend a stock that is available on Ondo (has an Ondo URL in
+  the portfolio snapshot)
+- The user asks "how do I buy {stock}" or "where can I trade this"
+- Your analysis concludes a stock looks attractive and the user seems
+  ready to act
+
+Only call for tickers that have an Ondo URL in the snapshot — don't
+guess. One call per ticker. The button renders on screen and stays
+visible so the user can click it at any time during or after the call.
 `.trim();

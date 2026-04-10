@@ -11,6 +11,7 @@
 import { useEffect, useRef } from 'react';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
 import Linkify from './Linkify';
+import ActButton from './ActButton';
 import ConfirmChangeCard, {
   type PendingProposal,
 } from './ConfirmChangeCard';
@@ -18,6 +19,12 @@ import type {
   VoiceMode as VoiceModeType,
   VoiceTranscriptEntry,
 } from '@/hooks/useVoiceSession';
+
+interface OndoLinkEntry {
+  id: string;
+  ticker: string;
+  ondoSymbol: string;
+}
 
 interface VoiceModeProps {
   mode: VoiceModeType;
@@ -30,6 +37,8 @@ interface VoiceModeProps {
   proposals?: PendingProposal[];
   onProposalConfirm?: (id: string) => void;
   onProposalCancel?: (id: string) => void;
+  /** Ondo "Act on" buttons from the show_ondo_link tool call. */
+  ondoLinks?: OndoLinkEntry[];
 }
 
 export default function VoiceMode({
@@ -42,6 +51,7 @@ export default function VoiceMode({
   proposals = [],
   onProposalConfirm,
   onProposalCancel,
+  ondoLinks = [],
 }: VoiceModeProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -119,6 +129,19 @@ export default function VoiceMode({
               onConfirm={onProposalConfirm ?? (() => {})}
               onCancel={onProposalCancel ?? (() => {})}
             />
+          ))}
+        {ondoLinks.length > 0 &&
+          ondoLinks.map((link) => (
+            <div key={link.id} className="my-2">
+              <ActButton
+                asset={{
+                  ticker: link.ticker,
+                  ondoSymbol: link.ondoSymbol,
+                  sentimentScore: 0,
+                  reasoning: '',
+                }}
+              />
+            </div>
           ))}
       </div>
     </div>

@@ -250,7 +250,9 @@ async function handleDiscover(previousResponseId?: string): Promise<CopilotRespo
  * English words that look like tickers (A, I, AM, IS, IT, DO, etc.)
  * to avoid false positives.
  */
-const TICKER_IN_TEXT = /\$?(?:\*{1,2})?([A-Z]{1,5})(?:\*{1,2})?\b/g;
+// Match tickers in bot output: $NVDA, NVDA, **NVDA**, *NVDA* etc.
+// Uses a lookahead instead of \b so markdown-wrapped tickers match.
+const TICKER_IN_TEXT = /(?:^|[\s($*_])([A-Z]{1,5})(?=[)\s.,;:!?*_]|$)/gm;
 const FALSE_POSITIVE_WORDS = new Set([
   'A', 'I', 'AM', 'AN', 'AS', 'AT', 'BE', 'BY', 'DO', 'GO', 'IF',
   'IN', 'IS', 'IT', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'TO', 'UP',

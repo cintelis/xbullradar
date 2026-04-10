@@ -70,6 +70,11 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   // is a two-stage commit card: the bot proposes, the user confirms.
   const [proposals, setProposals] = useState<PendingProposal[]>([]);
 
+  // Ondo "Act on" buttons rendered by the show_ondo_link voice tool.
+  const [ondoLinks, setOndoLinks] = useState<
+    Array<{ id: string; ticker: string; ondoSymbol: string }>
+  >([]);
+
   const handleProposalConfirm = useCallback(async (id: string) => {
     setProposals((prev) =>
       prev.map((p) => (p.id === id ? { ...p, status: 'confirming' as ProposalStatus } : p)),
@@ -141,6 +146,27 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
   // can dispatch tool calls from xAI to our handlers.
   const toolHandlers: VoiceToolHandlers = useMemo(
     () => ({
+      show_ondo_link: async (args: Record<string, unknown>) => {
+        const ticker =
+          typeof args.ticker === 'string'
+            ? args.ticker.trim().toUpperCase()
+            : '';
+        if (!ticker) return { error: 'Missing ticker.' };
+        const ondoSymbol = `${ticker.toLowerCase()}on`;
+        setOndoLinks((prev) => [
+          ...prev,
+          {
+            id: `ondo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            ticker,
+            ondoSymbol,
+          },
+        ]);
+        return {
+          shown: true,
+          message: `Showing "Act on ${ticker}on" button on user's screen. They can click it to open Ondo Finance.`,
+        };
+      },
+
       propose_holding_change: async (args: Record<string, unknown>) => {
         const ticker =
           typeof args.ticker === 'string'
@@ -479,6 +505,7 @@ export default function CopilotChat({ onHide }: CopilotChatProps = {}) {
           proposals={proposals}
           onProposalConfirm={handleProposalConfirm}
           onProposalCancel={handleProposalCancel}
+          ondoLinks={ondoLinks}
         />
       ) : (
         <>
