@@ -4,7 +4,8 @@ import { callGrokResponses, recentXSearchTool } from '@/lib/grok';
 import { getCurrentUser } from '@/lib/auth';
 import { INVESTING_SYSTEM_PROMPT } from '@/lib/copilot/prompt';
 import { loadPortfolioContext } from '@/lib/copilot/context';
-import type { CopilotRequest, CopilotResponse } from '@/types';
+import { isOnOndo } from '@/lib/ondo';
+import type { CopilotRequest, CopilotResponse, CopilotUiAction } from '@/types';
 
 export const runtime = 'nodejs';
 
@@ -156,8 +157,17 @@ async function handleConversational(
     tools: [recentXSearchTool(2), { type: 'web_search' }],
   });
 
+  // Post-process: scan the bot's reply for ticker mentions that are
+  // available on Ondo Finance. If found, attach a showActButton UI
+  // action so the green "Act on {TICKER}on" CTA renders below the
+  // reply. Picks the first Ondo-available ticker mentioned — if the
+  // bot discussed multiple stocks, the most prominent one (mentioned
+  // first) gets the button.
+  const ui = extractOndoAction(result.output_text, message);
+
   return {
     message: result.output_text,
+    ui,
     responseId: result.id,
     citations: result.citations,
   };
@@ -223,4 +233,57 @@ async function handleDiscover(previousResponseId?: string): Promise<CopilotRespo
     responseId: top.responseId,
     citations: top.citations,
   };
+}
+
+/**
+ * Scan bot reply + user message for ticker mentions that are available
+ * on Ondo Finance. Returns a showActButton UI action for the first
+ * match, or undefined if no Ondo-available ticker was discussed.
+ *
+ * Detection: look for 1-5 uppercase letters that match stock tickers.
+ * We check both the bot's reply and the user's original message (the
+ * user might have asked "tell me about AMZN" and the bot responded
+ * without repeating the ticker in uppercase). Priority: tickers in
+ * the bot's reply first, then the user's message.
+ *
+ * We scan for patterns like $NVDA, NVDA, **NVDA**, but skip common
+ * English words that look like tickers (A, I, AM, IS, IT, DO, etc.)
+ * to avoid false positives.
+ */
+const TICKER_IN_TEXT = /\$?(?:\*{1,2})?([A-Z]{1,5})(?:\*{1,2})?\b/g;
+const FALSE_POSITIVE_WORDS = new Set([
+  'A', 'I', 'AM', 'AN', 'AS', 'AT', 'BE', 'BY', 'DO', 'GO', 'IF',
+  'IN', 'IS', 'IT', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'TO', 'UP',
+  'US', 'WE', 'ALL', 'AND', 'ARE', 'BUT', 'CAN', 'DID', 'FOR', 'GET',
+  'GOT', 'HAS', 'HAD', 'HER', 'HIM', 'HIS', 'HOW', 'ITS', 'LET',
+  'MAY', 'NEW', 'NOT', 'NOW', 'OLD', 'ONE', 'OUR', 'OUT', 'OWN',
+  'SAY', 'SHE', 'THE', 'TOO', 'TWO', 'USE', 'WAY', 'WHO', 'WHY',
+  'YES', 'YET', 'YOU', 'BUY', 'SELL', 'HOLD', 'CASH', 'BOND',
+  'RICH', 'FAIR', 'CHEAP', 'ERP', 'ETF', 'IPO', 'CEO', 'CFO',
+  'SEC', 'FED', 'GDP', 'CPI', 'NFP', 'YOY', 'QOQ',
+]);
+
+function extractOndoAction(
+  botReply: string,
+  userMessage: string,
+): CopilotUiAction | undefined {
+  // Search bot reply first, then user message.
+  for (const text of [botReply, userMessage]) {
+    for (const match of text.matchAll(TICKER_IN_TEXT)) {
+      const ticker = match[1];
+      if (FALSE_POSITIVE_WORDS.has(ticker)) continue;
+      if (isOnOndo(ticker)) {
+        return {
+          type: 'showActButton',
+          props: {
+            ticker,
+            ondoSymbol: `${ticker.toLowerCase()}on`,
+            sentimentScore: 0, // not relevant here — button shows regardless
+            reasoning: '',
+          },
+        };
+      }
+    }
+  }
+  return undefined;
 }
