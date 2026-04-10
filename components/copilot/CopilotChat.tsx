@@ -8,6 +8,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Download, Mic, Send, Trash2, ChevronRight } from 'lucide-react';
 import ActButton from './ActButton';
+import Linkify from './Linkify';
 import VoiceMode from './VoiceMode';
 import ConfirmChangeCard, {
   type PendingProposal,
@@ -577,7 +578,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
             voice
           </div>
         )}
-        <p className="whitespace-pre-wrap">{msg.content}</p>
+        <p className="whitespace-pre-wrap"><Linkify text={msg.content} /></p>
         {msg.ui?.type === 'showActButton' && (
           <div className="mt-3">
             <ActButton

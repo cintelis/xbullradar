@@ -10,6 +10,7 @@
 
 import { useEffect, useRef } from 'react';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
+import Linkify from './Linkify';
 import ConfirmChangeCard, {
   type PendingProposal,
 } from './ConfirmChangeCard';
@@ -187,7 +188,7 @@ function TranscriptBubble({
         }
       >
         <p className="whitespace-pre-wrap">
-          {entry.text}
+          <Linkify text={entry.text} />
           {partial && <span className="ml-1 inline-block animate-pulse">▍</span>}
         </p>
       </div>
