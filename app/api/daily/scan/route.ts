@@ -7,6 +7,7 @@ import { refreshFundamentalSignal } from '@/lib/fundamentals';
 import { refreshMarkets } from '@/lib/markets';
 import { refreshNews } from '@/lib/news';
 import { refreshEarnings } from '@/lib/earnings';
+import { refreshOndoCache } from '@/lib/ondo';
 
 export const runtime = 'nodejs';
 
@@ -64,6 +65,16 @@ async function runScan() {
     console.log('[daily/scan] refreshed news cache (4 categories)');
   } catch (err) {
     console.error('[daily/scan] news cache refresh failed', err);
+  }
+
+  // Refresh the Ondo Finance asset catalog so isOnOndo() and getOndoUrl()
+  // use the live list instead of the static fallback. Non-fatal — the
+  // static fallback covers the most important tickers.
+  try {
+    const count = await refreshOndoCache();
+    console.log(`[daily/scan] refreshed Ondo cache, ${count} assets`);
+  } catch (err) {
+    console.error('[daily/scan] Ondo cache refresh failed', err);
   }
 
   const userIds = await store.listUserIds();

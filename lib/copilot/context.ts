@@ -17,7 +17,7 @@ import {
   getNextEarnings,
   getEarningsBeatRate,
 } from '@/lib/earnings';
-import { isOnOndo, getOndoUrl } from '@/lib/ondo';
+import { isOnOndo, getOndoUrl, isOndoCacheLive, refreshOndoCache } from '@/lib/ondo';
 
 /**
  * Returns a markdown-formatted portfolio snapshot, or null if the user
@@ -36,6 +36,14 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
   ]);
 
   if (holdings.length === 0 && cash.length === 0) return null;
+
+  // Ensure the Ondo ticker set is live (not static fallback) before we
+  // tag holdings with Ondo URLs. This is a no-op if the cache is already
+  // warm (< 1ms). Only the first call in a cold serverless instance does
+  // the actual API fetch.
+  if (!isOndoCacheLive()) {
+    await refreshOndoCache().catch(() => {});
+  }
 
   const enriched = await Promise.all(
     holdings.map(async (h) => {
