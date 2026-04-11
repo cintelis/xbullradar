@@ -29,7 +29,10 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const initialError = params.error ?? null;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-6">
+    <div
+      className="flex min-h-screen items-center justify-center bg-zinc-950 p-6"
+      style={{ backgroundImage: 'url(/assets/login-pattern.svg)', backgroundSize: '200px 200px' }}
+    >
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <Image
