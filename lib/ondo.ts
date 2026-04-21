@@ -16,8 +16,10 @@ import { Redis } from '@upstash/redis';
 import { getUpstashConfig } from './store-upstash';
 
 const ONDO_API_BASE = 'https://api.gm.ondo.finance';
-const CACHE_KEY = 'xbr:ondo:assets:v1';
-const CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours
+const CATALOG_CACHE_KEY = 'xbr:ondo:catalog:v1';
+const CATALOG_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours
+const PRICES_CACHE_KEY = 'xbr:ondo:prices:v1';
+const PRICES_CACHE_TTL_SECONDS = 60;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -168,7 +170,7 @@ export async function getOndoAssets(): Promise<OndoAssetsCache> {
       // Try cache first.
       const redis = getRedis();
       if (redis) {
-        const cached = await redis.get<OndoAssetsCache | string>(CACHE_KEY);
+        const cached = await redis.get<OndoAssetsCache | string>(CATALOG_CACHE_KEY);
         const parsed = parseCached(cached);
         if (parsed) return parsed;
       }
@@ -183,13 +185,13 @@ export async function getOndoAssets(): Promise<OndoAssetsCache> {
       };
 
       if (redis) {
-        await redis.set(CACHE_KEY, JSON.stringify(fresh), {
-          ex: CACHE_TTL_SECONDS,
+        await redis.set(CATALOG_CACHE_KEY, JSON.stringify(fresh), {
+          ex: CATALOG_CACHE_TTL_SECONDS,
         });
       }
 
       console.log(
-        `[ondo] fetched ${assets.length} assets from API, cached for ${CACHE_TTL_SECONDS / 3600}h`,
+        `[ondo] fetched ${assets.length} assets from API, cached for ${CATALOG_CACHE_TTL_SECONDS / 3600}h`,
       );
       return fresh;
     } catch (err) {
@@ -263,4 +265,114 @@ export function isOndoCacheLive(): boolean {
 /** Total number of tickers currently known. */
 export function getOndoTickerCount(): number {
   return _tickerSet.size;
+}
+
+// ─── Live prices (60s cache) ────────────────────────────────────────────────
+
+interface OndoPricesCache {
+  byTicker: Record<string, OndoAssetPrice>;
+  fetchedAt: string;
+}
+
+export interface OndoAssetView {
+  ondoSymbol: string;
+  ticker: string;
+  tokenPrice: number;
+  stockPrice: number;
+  premiumPct: number;
+  timestamp: number;
+}
+
+function parsePricesCached(raw: unknown): OndoPricesCache | null {
+  if (raw == null) return null;
+  if (typeof raw === 'object' && raw !== null && 'byTicker' in raw) {
+    return raw as OndoPricesCache;
+  }
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as OndoPricesCache;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+let pricesInFlight: Promise<OndoPricesCache> | null = null;
+
+async function getOndoPrices(): Promise<OndoPricesCache> {
+  if (pricesInFlight) return pricesInFlight;
+
+  pricesInFlight = (async () => {
+    try {
+      const redis = getRedis();
+      if (redis) {
+        const cached = await redis.get<OndoPricesCache | string>(PRICES_CACHE_KEY);
+        const parsed = parsePricesCached(cached);
+        if (parsed) return parsed;
+      }
+
+      const assets = await fetchFromApi();
+      const byTicker: Record<string, OndoAssetPrice> = {};
+      for (const a of assets) byTicker[a.ticker] = a;
+
+      const fresh: OndoPricesCache = {
+        byTicker,
+        fetchedAt: new Date().toISOString(),
+      };
+
+      if (redis) {
+        await redis.set(PRICES_CACHE_KEY, JSON.stringify(fresh), {
+          ex: PRICES_CACHE_TTL_SECONDS,
+        });
+      }
+
+      return fresh;
+    } finally {
+      pricesInFlight = null;
+    }
+  })();
+
+  return pricesInFlight;
+}
+
+/**
+ * Get live Ondo token + stock price for a ticker, plus the spread.
+ * Returns null if the ticker isn't on Ondo, if we only have static
+ * fallback data (no real prices), or if the live prices fetch failed.
+ */
+export async function getOndoAsset(ticker: string): Promise<OndoAssetView | null> {
+  const upper = ticker.toUpperCase();
+
+  let prices: OndoPricesCache;
+  try {
+    prices = await getOndoPrices();
+  } catch {
+    return null;
+  }
+
+  const entry = prices.byTicker[upper];
+  if (!entry) return null;
+
+  const tokenPrice = Number(entry.tokenPrice);
+  const stockPrice = Number(entry.stockPrice);
+  if (
+    !Number.isFinite(tokenPrice) ||
+    !Number.isFinite(stockPrice) ||
+    tokenPrice <= 0 ||
+    stockPrice <= 0
+  ) {
+    return null;
+  }
+
+  const premiumPct = ((tokenPrice - stockPrice) / stockPrice) * 100;
+
+  return {
+    ondoSymbol: entry.ondoSymbol,
+    ticker: entry.ticker,
+    tokenPrice,
+    stockPrice,
+    premiumPct,
+    timestamp: entry.timestamp,
+  };
 }

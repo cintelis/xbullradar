@@ -31,6 +31,7 @@ import type {
   CashCategory,
   CashHolding,
   EnrichedPortfolioHolding,
+  OndoAssetData,
 } from '@/types';
 
 const MAX_SHARES = 1_000_000_000;
@@ -106,6 +107,7 @@ interface RowState {
 
 export default function PortfolioView() {
   const [rows, setRows] = useState<RowState[]>([]);
+  const [ondoMap, setOndoMap] = useState<Record<string, OndoAssetData | null>>({});
   const [cash, setCash] = useState<CashHolding[]>([]);
   const [totals, setTotals] = useState<PortfolioApiResponse['totals']>(EMPTY_TOTALS);
   const [pricesAsOfDate, setPricesAsOfDate] = useState<string | null>(null);
@@ -240,6 +242,35 @@ export default function PortfolioView() {
       window.removeEventListener('portfolio:updated', onPortfolioUpdated);
     };
   }, [refreshAll]);
+
+  // Fire /api/ondo/asset per holding in parallel whenever the ticker
+  // set changes. 404 → not on Ondo, leave slot undefined so the row
+  // renders nothing extra. Don't block initial render; fill in as
+  // responses arrive. Server caches for 60s so duplicates are cheap.
+  const tickerKey = rows.map((r) => r.holding.ticker).sort().join(',');
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const controller = new AbortController();
+    for (const r of rows) {
+      const ticker = r.holding.ticker;
+      fetch(`/api/ondo/asset?ticker=${encodeURIComponent(ticker)}`, {
+        signal: controller.signal,
+      })
+        .then(async (res) => {
+          if (!res.ok) return null;
+          return (await res.json()) as OndoAssetData;
+        })
+        .then((data) => {
+          if (controller.signal.aborted) return;
+          setOndoMap((prev) => ({ ...prev, [ticker]: data }));
+        })
+        .catch(() => {
+          // network failure or aborted — silently ignore
+        });
+    }
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickerKey]);
 
   // Replace the entire holdings array server-side, then refetch.
   async function updateHoldings(next: Array<{ ticker: string; shares: number }>): Promise<void> {
@@ -642,7 +673,8 @@ export default function PortfolioView() {
                       />
                     </td>
                     <td className="py-2 px-2 text-right font-mono text-zinc-300">
-                      {h.lastClose != null ? `$${h.lastClose.toFixed(2)}` : '—'}
+                      <div>{h.lastClose != null ? `$${h.lastClose.toFixed(2)}` : '—'}</div>
+                      <OndoInlinePrice data={ondoMap[h.ticker]} />
                     </td>
                     <td
                       className={`py-2 px-2 text-right font-mono ${
@@ -755,6 +787,7 @@ export default function PortfolioView() {
                             ? `${h.dayChangePercent > 0 ? '+' : ''}${h.dayChangePercent.toFixed(2)}%`
                             : '—'}
                         </p>
+                        <OndoInlinePrice data={ondoMap[h.ticker]} />
                       </div>
                       <CombinedBadge signal={r.combined} />
                     </div>
@@ -1179,6 +1212,29 @@ function formatShares(value: number): string {
     minimumFractionDigits: 0,
     maximumFractionDigits: 4,
   });
+}
+
+function ondoSpreadToneClass(premiumPct: number): string {
+  const abs = Math.abs(premiumPct);
+  if (abs < 0.5) return 'text-zinc-500';
+  if (abs < 2) return 'text-amber-400';
+  return 'text-red-400';
+}
+
+function OndoInlinePrice({ data }: { data: OndoAssetData | null | undefined }) {
+  if (!data) return null;
+  const pct = data.premiumPct;
+  const sign = pct > 0 ? '+' : pct < 0 ? '−' : '';
+  const pctStr = `${sign}${Math.abs(pct).toFixed(2)}%`;
+  return (
+    <div
+      className="mt-0.5 font-mono text-[10px] text-zinc-500"
+      title={`Ondo ${data.ondoSymbol} on-chain price vs underlying stock`}
+    >
+      Ondo: ${data.tokenPrice.toFixed(2)}{' '}
+      <span className={ondoSpreadToneClass(pct)}>({pctStr})</span>
+    </div>
+  );
 }
 
 function formatChange(amount: number | null, percent: number | null): string {

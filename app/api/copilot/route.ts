@@ -180,17 +180,25 @@ async function handleTicker(
   const sentiment = await analyzeTicker(ticker, previousResponseId);
 
   if (sentiment.score > 0.5) {
-    return {
-      message: `🚀 Strong bullish sentiment on **${sentiment.ticker}** (${sentiment.score.toFixed(2)}). ${sentiment.reasoning}`,
-      ui: {
-        type: 'showActButton',
-        props: {
-          ticker: sentiment.ticker,
-          ondoSymbol: `${sentiment.ticker.toLowerCase()}on`,
-          sentimentScore: sentiment.score,
-          reasoning: sentiment.reasoning,
+    const message = `🚀 Strong bullish sentiment on **${sentiment.ticker}** (${sentiment.score.toFixed(2)}). ${sentiment.reasoning}`;
+    if (isOnOndo(sentiment.ticker)) {
+      return {
+        message,
+        ui: {
+          type: 'showActButton',
+          props: {
+            ticker: sentiment.ticker,
+            ondoSymbol: `${sentiment.ticker.toLowerCase()}on`,
+            sentimentScore: sentiment.score,
+            reasoning: sentiment.reasoning,
+          },
         },
-      },
+        responseId: sentiment.responseId,
+        citations: sentiment.citations,
+      };
+    }
+    return {
+      message,
       responseId: sentiment.responseId,
       citations: sentiment.citations,
     };

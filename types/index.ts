@@ -18,6 +18,22 @@ export interface OndoTokenizedAsset {
 }
 
 /**
+ * Live on-chain price snapshot for a tokenized Ondo asset. Returned by
+ * GET /api/ondo/asset?ticker=X and used to show the tokenized vs
+ * underlying stock price alongside the premium/discount spread.
+ *
+ * premiumPct is a raw percentage (e.g. 0.028 = +0.028%, not 2.8%).
+ */
+export interface OndoAssetData {
+  ondoSymbol: string;
+  ticker: string;
+  tokenPrice: number;
+  stockPrice: number;
+  premiumPct: number;
+  timestamp: number;
+}
+
+/**
  * Persisted portfolio holding — the source-of-truth shape stored in Upstash
  * (or JsonFileStore in dev). Just ticker + shares; everything else is
  * computed at read time from the price + sentiment caches.

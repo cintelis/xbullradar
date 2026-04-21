@@ -17,7 +17,12 @@ import {
   getNextEarnings,
   getEarningsBeatRate,
 } from '@/lib/earnings';
-import { isOnOndo, getOndoUrl, isOndoCacheLive, refreshOndoCache } from '@/lib/ondo';
+import {
+  getOndoUrl,
+  isOndoCacheLive,
+  refreshOndoCache,
+  getOndoAsset,
+} from '@/lib/ondo';
 
 /**
  * Returns a markdown-formatted portfolio snapshot, or null if the user
@@ -48,10 +53,11 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
   const enriched = await Promise.all(
     holdings.map(async (h) => {
       const ticker = h.ticker.toUpperCase();
-      const [fund, history, earnings] = await Promise.all([
+      const [fund, history, earnings, ondo] = await Promise.all([
         getFundamentalSignal(ticker).catch(() => null),
         getHistoricalCloses(ticker).catch(() => null),
         getEarnings(ticker).catch(() => null),
+        getOndoAsset(ticker).catch(() => null),
       ]);
       const tech =
         history && history.closes.length > 0
@@ -71,6 +77,7 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
         tech,
         nextEarningsDate: next?.date ?? null,
         beatRate,
+        ondo,
       };
     }),
   );
@@ -136,7 +143,7 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
         ? ` value $${formatNum(value)}${pct != null ? ` (${pct.toFixed(1)}% of book)` : ''}`
         : '';
 
-    const ondoUrl = getOndoUrl(r.ticker);
+    const ondoUrl = r.ondo ? getOndoUrl(r.ticker) : null;
     const ondoStr = ondoUrl ? `, Ondo: ${ondoUrl}` : '';
     lines.push(
       `- ${r.ticker}: ${r.shares} sh${closeStr}${valueStr}${dayStr}`,
@@ -144,6 +151,13 @@ export async function loadPortfolioContext(userId: string): Promise<string | nul
     lines.push(
       `  P/E ${peStr}, ERP ${erpStr}, Fund ${fundStr}, Tech ${techStr}, sentiment ${sentStr}, ${earningsStr}${beatStr}${ondoStr}`,
     );
+    if (r.ondo && Math.abs(r.ondo.premiumPct) > 1) {
+      const label = r.ondo.premiumPct >= 0 ? 'premium' : 'discount';
+      const sign = r.ondo.premiumPct >= 0 ? '+' : '';
+      lines.push(
+        `  Ondo spread: ${sign}${r.ondo.premiumPct.toFixed(1)}% ${label} (${r.ondo.ondoSymbol} $${r.ondo.tokenPrice.toFixed(2)} vs stock $${r.ondo.stockPrice.toFixed(2)})`,
+      );
+    }
   }
 
   if (cash.length > 0) {
